@@ -1,0 +1,30 @@
+{
+  "name": "hospital-management-system",
+  "version": "1.0.0",
+  "description": "Hospital Management System with React frontend and Node.js backend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "client": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "sqlite3": "^5.1.6",
+    "cors": "^2.8.5",
+    "uuid": "^9.0.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "lucide-react": "^0.263.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1",
+    "vite": "^4.4.9",
+    "@vitejs/plugin-react": "^4.0.3",
+    "tailwindcss": "^3.3.0",
+    "autoprefixer": "^10.4.14",
+    "postcss": "^8.4.27"
+  }
+}
