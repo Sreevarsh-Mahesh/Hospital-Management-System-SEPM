@@ -33,6 +33,7 @@ function initializeDatabase() {
         name TEXT NOT NULL,
         role TEXT NOT NULL,
         specialty TEXT,
+        salary REAL DEFAULT 0,
         password TEXT DEFAULT 'password123',
         createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
       )
@@ -81,6 +82,20 @@ function initializeDatabase() {
         prescription TEXT NOT NULL,
         symptoms TEXT,
         notes TEXT,
+        requiresAdmission INTEGER DEFAULT 0,
+        createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Beds table
+    db.run(`
+      CREATE TABLE IF NOT EXISTS beds (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        wardName TEXT NOT NULL,
+        bedNumber TEXT NOT NULL,
+        status TEXT DEFAULT 'Available',
+        patientName TEXT,
+        patientEmail TEXT,
         createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -93,9 +108,11 @@ function initializeDatabase() {
         patientEmail TEXT NOT NULL,
         amount REAL NOT NULL,
         status TEXT DEFAULT 'Pending',
+        paymentMethod TEXT,
         date TEXT NOT NULL,
         service TEXT NOT NULL,
         dueDate TEXT,
+        recordId INTEGER,
         createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
@@ -124,16 +141,16 @@ function seedInitialData() {
     if (row.count === 0) {
       // Insert users
       const users = [
-        { id: uuidv4(), email: 'admin@mail.com', name: 'System Administrator', role: 'admin' },
-        { id: uuidv4(), email: 'doctor@mail.com', name: 'Dr. Sarah Wilson', role: 'doctor', specialty: 'Cardiology' },
-        { id: uuidv4(), email: 'reception@mail.com', name: 'Front Desk (Emma)', role: 'reception' },
-        { id: uuidv4(), email: 'patient@mail.com', name: 'James Anderson', role: 'patient' }
+        { id: uuidv4(), email: 'admin@mail.com', name: 'System Administrator', role: 'admin', salary: 12000 },
+        { id: uuidv4(), email: 'doctor@mail.com', name: 'Dr. Sarah Wilson', role: 'doctor', specialty: 'Cardiology', salary: 18000 },
+        { id: uuidv4(), email: 'reception@mail.com', name: 'Front Desk (Emma)', role: 'reception', salary: 4500 },
+        { id: uuidv4(), email: 'patient@mail.com', name: 'James Anderson', role: 'patient', salary: 0 }
       ];
 
       users.forEach(user => {
         db.run(
-          'INSERT INTO users (id, email, name, role, specialty) VALUES (?, ?, ?, ?, ?)',
-          [user.id, user.email, user.name, user.role, user.specialty || null]
+          'INSERT INTO users (id, email, name, role, specialty, salary) VALUES (?, ?, ?, ?, ?, ?)',
+          [user.id, user.email, user.name, user.role, user.specialty || null, user.salary || 0]
         );
       });
 
@@ -178,6 +195,18 @@ function seedInitialData() {
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
         ['James Anderson', 'patient@mail.com', 150, 'Paid', '2024-03-30', 'Cardio Checkup', '2024-04-15']
       );
+
+      // Insert sample beds
+      const wards = [
+        { name: 'ICU', count: 4, prefix: 'ICU-' },
+        { name: 'General Ward', count: 8, prefix: 'GW-' },
+        { name: 'Private Suite', count: 4, prefix: 'PS-' }
+      ];
+      wards.forEach(ward => {
+        for (let i = 1; i <= ward.count; i++) {
+          db.run('INSERT INTO beds (wardName, bedNumber) VALUES (?, ?)', [ward.name, ward.prefix + i]);
+        }
+      });
 
       console.log('Initial data seeded successfully');
     }
@@ -319,15 +348,28 @@ app.get('/api/medical-records', (req, res) => {
 });
 
 app.post('/api/medical-records', (req, res) => {
-  const { patientName, patientEmail, date, doctor, diagnosis, prescription, symptoms, notes } = req.body;
+  const { patientName, patientEmail, date, doctor, diagnosis, prescription, symptoms, notes, requiresAdmission } = req.body;
   
   db.run(
-    `INSERT INTO medical_records (patientName, patientEmail, date, doctor, diagnosis, prescription, symptoms, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    [patientName, patientEmail, date, doctor, diagnosis, prescription, symptoms || '', notes || ''],
+    `INSERT INTO medical_records (patientName, patientEmail, date, doctor, diagnosis, prescription, symptoms, notes, requiresAdmission)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [patientName, patientEmail, date, doctor, diagnosis, prescription, symptoms || '', notes || '', requiresAdmission ? 1 : 0],
     function(err) {
       if (err) return res.status(500).json({ error: err.message });
-      res.json({ id: this.lastID, patientName, patientEmail, date, doctor, diagnosis, prescription, symptoms, notes });
+      
+      const recordId = this.lastID;
+      const amount = 150.00; // Standard consultation fee
+      const dueDate = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+      
+      db.run(
+        `INSERT INTO bills (patientName, patientEmail, amount, status, date, service, dueDate, recordId)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [patientName, patientEmail, amount, 'Pending', date, `Consultation: ${diagnosis}`, dueDate, recordId],
+        (billErr) => {
+          if (billErr) console.error('Auto-billing failed:', billErr);
+          res.json({ id: recordId, patientName, patientEmail, date, doctor, diagnosis, prescription, symptoms, notes, requiresAdmission });
+        }
+      );
     }
   );
 });
@@ -375,11 +417,20 @@ app.post('/api/bills', (req, res) => {
 
 app.put('/api/bills/:id', (req, res) => {
   const { id } = req.params;
-  const { status } = req.body;
+  const { status, paymentMethod } = req.body;
   
-  db.run('UPDATE bills SET status = ? WHERE id = ?', [status, id], (err) => {
+  const fields = ['status = ?'];
+  const values = [status];
+  
+  if (paymentMethod !== undefined) {
+    fields.push('paymentMethod = ?');
+    values.push(paymentMethod);
+  }
+  values.push(id);
+  
+  db.run(`UPDATE bills SET ${fields.join(', ')} WHERE id = ?`, values, (err) => {
     if (err) return res.status(500).json({ error: err.message });
-    res.json({ id, status });
+    res.json({ id, status, paymentMethod });
   });
 });
 
@@ -413,6 +464,66 @@ app.post('/api/notifications', (req, res) => {
       res.json({ id: this.lastID, userId, text, time: new Date(), read: 0 });
     }
   );
+});
+
+// --- BEDS ENDPOINTS ---
+app.get('/api/beds', (req, res) => {
+  db.all('SELECT * FROM beds', (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+app.put('/api/beds/:id', (req, res) => {
+  const { id } = req.params;
+  const { status, patientName, patientEmail } = req.body;
+  
+  db.run(
+    'UPDATE beds SET status = ?, patientName = ?, patientEmail = ? WHERE id = ?',
+    [status, patientName || null, patientEmail || null, id],
+    (err) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json({ id, status, patientName, patientEmail });
+    }
+  );
+});
+
+// --- FINANCIALS ENDPOINT ---
+app.get('/api/financials', (req, res) => {
+  db.all('SELECT * FROM bills', (err, bills) => {
+    if (err) return res.status(500).json({ error: err.message });
+    
+    db.all('SELECT name, role, salary FROM users WHERE role != "patient"', (err2, staff) => {
+      if (err2) return res.status(500).json({ error: err2.message });
+      
+      const totalRevenue = bills.filter(b => b.status === 'Paid').reduce((sum, b) => sum + b.amount, 0);
+      const totalPending = bills.filter(b => b.status === 'Pending').reduce((sum, b) => sum + b.amount, 0);
+      const totalSalaries = staff.reduce((sum, s) => sum + (s.salary || 0), 0);
+      
+      res.json({
+        revenue: totalRevenue,
+        pending: totalPending,
+        expenses: totalSalaries,
+        netProfit: totalRevenue - totalSalaries,
+        staff: staff,
+        bills: bills.slice(-10) // Last 10 bills for recent activity
+      });
+    });
+  });
+});
+
+// --- PENDING ADMISSIONS ENDPOINT ---
+app.get('/api/pending-admissions', (req, res) => {
+  db.all(`
+    SELECT m.* FROM medical_records m
+    WHERE m.requiresAdmission = 1 
+    AND (m.patientEmail IS NULL OR m.patientEmail NOT IN (
+      SELECT patientEmail FROM beds WHERE status = 'Occupied' AND patientEmail IS NOT NULL
+    ))
+  `, (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
 });
 
 // --- TIME SLOTS ENDPOINT ---

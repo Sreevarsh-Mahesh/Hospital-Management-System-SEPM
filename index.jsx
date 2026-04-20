@@ -22,7 +22,8 @@ import {
   User,
   UserPlus,
   Users,
-  X
+  X,
+  Bed
 } from 'lucide-react';
 
 const API_BASE = 'http://localhost:5055/api';
@@ -72,19 +73,24 @@ export default function App() {
   const [bills, setBills] = useState([]);
   const [notifications, setNotifications] = useState([]);
   const [timeSlots, setTimeSlots] = useState([]);
+  const [beds, setBeds] = useState([]);
+  const [pendingAdmissions, setPendingAdmissions] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [financials, setFinancials] = useState(null);
 
   const loadAllData = async (activeUser) => {
     setLoading(true);
     setError('');
     try {
-      const [doctorRows, appointmentRows, recordRows, billRows, slots] = await Promise.all([
+      const [doctorRows, appointmentRows, recordRows, billRows, slots, bedRows, admRows] = await Promise.all([
         request('/doctors'),
         request('/appointments'),
         request('/medical-records'),
         request('/bills'),
-        request('/time-slots')
+        request('/time-slots'),
+        request('/beds').catch(() => []),
+        request('/pending-admissions').catch(() => [])
       ]);
 
       setDoctors(doctorRows);
@@ -92,10 +98,17 @@ export default function App() {
       setRecords(recordRows);
       setBills(billRows);
       setTimeSlots(slots);
+      setBeds(bedRows);
+      setPendingAdmissions(admRows);
 
       if (activeUser?.id) {
         const noteRows = await request(`/notifications?userId=${encodeURIComponent(activeUser.id)}`).catch(() => []);
         setNotifications(noteRows);
+
+        if (activeUser.role === 'admin') {
+          const finData = await request('/financials').catch(() => null);
+          setFinancials(finData);
+        }
       }
     } catch (err) {
       setError(err.message);
@@ -135,6 +148,20 @@ export default function App() {
     setRecords([]);
     setBills([]);
     setNotifications([]);
+    setBeds([]);
+    setPendingAdmissions([]);
+  };
+
+  const updateBed = async (id, payload) => {
+    const updated = await request(`/beds/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(payload)
+    });
+    setBeds(prev => prev.map(b => b.id === id ? { ...b, ...updated } : b));
+    if (payload.status === 'Occupied') {
+      const admissionRows = await request('/pending-admissions').catch(() => []);
+      setPendingAdmissions(admissionRows);
+    }
   };
 
   const addAppointment = async (appt) => {
@@ -187,12 +214,12 @@ export default function App() {
     setDoctors((prev) => prev.filter((item) => item.id !== id));
   };
 
-  const markBillPaid = async (id) => {
+  const markBillPaid = async (id, paymentMethod = 'Cash') => {
     await request(`/bills/${id}`, {
       method: 'PUT',
-      body: JSON.stringify({ status: 'Paid' })
+      body: JSON.stringify({ status: 'Paid', paymentMethod })
     });
-    setBills((prev) => prev.map((bill) => (bill.id === id ? { ...bill, status: 'Paid' } : bill)));
+    setBills((prev) => prev.map((bill) => (bill.id === id ? { ...bill, status: 'Paid', paymentMethod } : bill)));
   };
 
   const createBill = async (billData) => {
@@ -209,6 +236,15 @@ export default function App() {
       body: JSON.stringify(recordData)
     });
     setRecords((prev) => [created, ...prev]);
+    if (recordData.requiresAdmission) {
+      const ads = await request('/pending-admissions').catch(() => []);
+      setPendingAdmissions(ads);
+      // Also refresh financials if admin
+      if (user.role === 'admin') {
+        const finData = await request('/financials').catch(() => null);
+        setFinancials(finData);
+      }
+    }
   };
 
   if (!user) {
@@ -262,7 +298,13 @@ export default function App() {
         </div>
         <nav className="flex-1 p-4 space-y-1">
           <SidebarLink icon={LayoutDashboard} label="Dashboard" active={view === 'dashboard'} onClick={() => setView('dashboard')} />
-          {user.role === 'admin' && <SidebarLink icon={Users} label="Manage Staff" active={view === 'manage_staff'} onClick={() => setView('manage_staff')} />}
+          {user.role === 'admin' && (
+            <>
+              <SidebarLink icon={Users} label="Manage Staff" active={view === 'manage_staff'} onClick={() => setView('manage_staff')} />
+              <SidebarLink icon={Bed} label="Bed Management" active={view === 'admin_beds'} onClick={() => setView('admin_beds')} />
+              <SidebarLink icon={TrendingUp} label="Financial Analytics" active={view === 'financials'} onClick={() => setView('financials')} />
+            </>
+          )}
           {user.role === 'doctor' && (
             <>
               <SidebarLink icon={ClipboardList} label="Patient Queue" active={view === 'doctor_queue'} onClick={() => setView('doctor_queue')} />
@@ -273,12 +315,14 @@ export default function App() {
             <>
               <SidebarLink icon={Calendar} label="Appointments" active={view === 'reception_booking'} onClick={() => setView('reception_booking')} />
               <SidebarLink icon={CreditCard} label="Billing" active={view === 'reception_billing'} onClick={() => setView('reception_billing')} />
+              <SidebarLink icon={Bed} label="Bed Management" active={view === 'reception_beds'} onClick={() => setView('reception_beds')} />
             </>
           )}
           {user.role === 'patient' && (
             <>
               <SidebarLink icon={Calendar} label="Book Medical" active={view === 'patient_book'} onClick={() => setView('patient_book')} />
               <SidebarLink icon={FileText} label="My History" active={view === 'patient_history'} onClick={() => setView('patient_history')} />
+              <SidebarLink icon={CreditCard} label="Billing & Payments" active={view === 'patient_billing'} onClick={() => setView('patient_billing')} />
             </>
           )}
         </nav>
@@ -319,11 +363,14 @@ export default function App() {
             <div className="lg:col-span-1"><BookingForm doctors={doctors} onBook={addAppointment} timeSlots={timeSlots} /></div>
           </div>
         )}
-        {view === 'reception_billing' && <BillingView bills={scopedBills} appointments={appointments} onMarkPaid={markBillPaid} onGenerate={createBill} />}
+        {view === 'reception_billing' && <BillingView bills={scopedBills} appointments={appointments} onMarkPaid={markBillPaid} onGenerate={createBill} isPatient={false} />}
+        {view === 'patient_billing' && <BillingView bills={scopedBills} appointments={appointments} onMarkPaid={markBillPaid} isPatient={true} />}
         {view === 'patient_book' && <PatientBookingView doctors={doctors} onBook={addAppointment} user={user} timeSlots={timeSlots} />}
         {view === 'patient_history' && <PatientHistoryView records={scopedRecords} />}
         {view === 'doctor_queue' && <DoctorQueueView appointments={scopedAppointments} setView={setView} />}
         {view === 'doctor_records' && <DoctorRecordsView records={scopedRecords} appointments={scopedAppointments} doctor={user} onAddRecord={addRecord} />}
+        {(view === 'admin_beds' || view === 'reception_beds') && <BedManagementView beds={beds} pendingAdmissions={pendingAdmissions} onUpdateBed={updateBed} />}
+        {view === 'financials' && financials && <FinancialDashboardView financials={financials} />}
       </main>
     </div>
   );
@@ -352,7 +399,7 @@ function DashboardView({ appointments, doctors, bills, notifications, records })
   const stats = [
     { label: 'Total Patients', value: patientCount, icon: Users, color: 'blue' },
     { label: 'Active Staff', value: doctors.length, icon: Stethoscope, color: 'emerald' },
-    { label: 'Revenue', value: `$${revenue.toFixed(2)}`, icon: TrendingUp, color: 'purple' }
+    { label: 'Revenue', value: `₹${revenue.toFixed(2)}`, icon: TrendingUp, color: 'purple' }
   ];
 
   return (
@@ -578,38 +625,156 @@ function BookingForm({ doctors, onBook, timeSlots }) {
   );
 }
 
-function BillingView({ bills, appointments, onMarkPaid, onGenerate }) {
+function PaymentModal({ bill, onClose, onPay, isPatient }) {
+  const [method, setMethod] = useState(isPatient ? 'Credit Card' : 'Cash');
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
+    // Simulate processing delay
+    setTimeout(() => {
+      onPay(bill.id, method);
+    }, 800);
+  };
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/50 flex items-center justify-center p-4 z-50 backdrop-blur-sm">
+      <Card className="w-full max-w-md bg-white shadow-2xl relative overflow-hidden">
+        <div className="bg-slate-900 absolute top-0 left-0 w-full h-24"></div>
+        <div className="p-6 relative z-10 pt-8">
+          <button onClick={onClose} className="absolute top-4 right-4 p-2 bg-white/10 hover:bg-white/20 rounded-full text-white transition-colors">
+            <X size={20} />
+          </button>
+          <div className="text-white mb-6">
+            <h3 className="text-xl font-bold">Process Payment</h3>
+            <p className="text-slate-300 text-sm opacity-80">{bill.service} - {bill.date}</p>
+          </div>
+
+          <div className="bg-white rounded-xl p-6 shadow-sm border border-slate-100 mb-6 flex flex-col items-center">
+            <span className="text-sm font-bold text-slate-400 uppercase tracking-wider mb-2">Total Amount</span>
+            <span className="text-4xl font-black text-slate-900">₹{bill.amount.toFixed(2)}</span>
+            <span className="text-xs text-blue-600 bg-blue-50 px-2 py-1 mt-2 rounded font-semibold">Bill #{bill.id}</span>
+          </div>
+
+          <form onSubmit={handleSubmit} className="space-y-6">
+            <div>
+              <label className="text-[10px] font-bold text-slate-400 uppercase tracking-wider block mb-3">Select Payment Method</label>
+              <div className="grid grid-cols-2 gap-3">
+                <label className={`cursor-pointer border-2 rounded-xl p-3 flex flex-col items-center gap-2 transition-all ${method === 'Credit Card' ? 'border-blue-600 bg-blue-50/50 text-blue-700' : 'border-slate-100 text-slate-600 hover:border-blue-200'}`}>
+                  <input type="radio" value="Credit Card" checked={method === 'Credit Card'} onChange={(e) => setMethod(e.target.value)} className="hidden" />
+                  <CreditCard size={24} className={method === 'Credit Card' ? 'text-blue-600' : 'text-slate-400'} />
+                  <span className="text-xs font-bold">Credit Card</span>
+                </label>
+                <label className={`cursor-pointer border-2 rounded-xl p-3 flex flex-col items-center gap-2 transition-all ${method === 'Insurance' ? 'border-blue-600 bg-blue-50/50 text-blue-700' : 'border-slate-100 text-slate-600 hover:border-blue-200'}`}>
+                  <input type="radio" value="Insurance" checked={method === 'Insurance'} onChange={(e) => setMethod(e.target.value)} className="hidden" />
+                  <Shield size={24} className={method === 'Insurance' ? 'text-blue-600' : 'text-slate-400'} />
+                  <span className="text-xs font-bold">Insurance</span>
+                </label>
+                {!isPatient && (
+                  <label className={`cursor-pointer border-2 rounded-xl p-3 flex flex-col items-center gap-2 transition-all ${method === 'Cash' ? 'border-blue-600 bg-blue-50/50 text-blue-700' : 'border-slate-100 text-slate-600 hover:border-blue-200'}`}>
+                    <input type="radio" value="Cash" checked={method === 'Cash'} onChange={(e) => setMethod(e.target.value)} className="hidden" />
+                    <Activity size={24} className={method === 'Cash' ? 'text-blue-600' : 'text-slate-400'} />
+                    <span className="text-xs font-bold">Cash</span>
+                  </label>
+                )}
+              </div>
+            </div>
+
+            <div className="h-40 relative">
+              {method === 'Credit Card' && (
+                <div className="space-y-3 absolute w-full top-0 left-0 transition-opacity duration-300">
+                  <input required placeholder="Card Number" className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition-all font-mono" />
+                  <div className="grid grid-cols-2 gap-3">
+                    <input required placeholder="MM/YY" className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition-all font-mono" />
+                    <input required placeholder="CVC" className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition-all font-mono" type="password" maxLength="4" />
+                  </div>
+                </div>
+              )}
+
+              {method === 'Insurance' && (
+                <div className="space-y-3 absolute w-full top-0 left-0 transition-opacity duration-300">
+                  <input required placeholder="Provider Name" className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition-all" />
+                  <input required placeholder="Policy Number" className="w-full p-3 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100 transition-all font-mono" />
+                </div>
+              )}
+
+              {method === 'Cash' && (
+                <div className="flex flex-col items-center justify-center p-6 text-slate-500 text-sm absolute w-full h-full top-0 left-0 text-center">
+                  <Activity className="h-10 w-10 text-slate-300 mb-2" />
+                  <p>Collect cash amount at the front desk before confirming.</p>
+                </div>
+              )}
+            </div>
+
+            <button type="submit" disabled={loading} className="w-full py-4 bg-slate-900 text-white rounded-xl font-bold text-sm tracking-wide hover:bg-slate-800 disabled:opacity-70 transition-all flex justify-center items-center gap-2 shadow-lg shadow-slate-900/20">
+              {loading ? (
+                <>
+                  <Activity className="animate-spin" size={18} /> Processing...
+                </>
+              ) : (
+                `Confirm Payment of ₹${bill.amount.toFixed(2)}`
+              )}
+            </button>
+          </form>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function BillingView({ bills, appointments, onMarkPaid, onGenerate, isPatient = false }) {
+  const [payingBill, setPayingBill] = useState(null);
+
   return (
     <div className="space-y-6">
       <Card>
         <div className="p-6 border-b border-slate-100 flex justify-between items-center">
-          <h3 className="font-bold">Patient Billing</h3>
-          <button
-            onClick={async () => {
-              const completed = appointments.find((a) => a.status === 'Completed');
-              if (!completed) return;
-              await onGenerate({
-                patientName: completed.patientName,
-                patientEmail: completed.patientEmail,
-                amount: 150,
-                service: completed.type || 'Consultation',
-                dueDate: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0]
-              });
-            }}
-            className="flex items-center space-x-1 text-blue-600 text-sm font-bold"
-          >
-            <Plus size={16} /> <span>Generate Invoice</span>
-          </button>
+          <h3 className="font-bold">{isPatient ? 'My Payments' : 'Patient Billing'}</h3>
         </div>
         <div className="divide-y divide-slate-100">
           {bills.map((b) => (
-            <div key={b.id} className="p-4 flex items-center justify-between hover:bg-slate-50">
-              <div className="flex items-center space-x-4"><div className="p-2 bg-slate-100 rounded-lg"><CreditCard size={20} className="text-slate-500" /></div><div><p className="font-bold">{b.patientName}</p><p className="text-xs text-slate-500">{b.service} • {b.date}</p></div></div>
-              <div className="flex items-center space-x-6"><span className="font-bold">${b.amount}</span><Badge status={b.status} />{b.status === 'Pending' && <button onClick={() => onMarkPaid(b.id)} className="text-blue-600 font-bold text-xs hover:underline">Mark Paid</button>}</div>
+            <div key={b.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between hover:bg-slate-50 group transition-colors">
+              <div className="flex items-center space-x-4 mb-3 sm:mb-0">
+                <div className={`p-2 rounded-lg ${b.status === 'Paid' ? 'bg-emerald-100' : 'bg-blue-100'}`}>
+                  <CreditCard size={20} className={b.status === 'Paid' ? 'text-emerald-600' : 'text-blue-600'} />
+                </div>
+                <div>
+                  <p className="font-bold text-slate-900">{isPatient ? b.service : b.patientName}</p>
+                  <p className="text-xs text-slate-500">{isPatient ? `Billed on ${b.date}` : `${b.service} • ${b.date}`}</p>
+                  {b.paymentMethod && <p className="text-[10px] text-slate-400 mt-0.5 font-semibold text-emerald-600 italic">Paid via {b.paymentMethod}</p>}
+                </div>
+              </div>
+              <div className="flex items-center justify-between sm:justify-end w-full sm:w-auto space-x-6">
+                <span className="font-black text-lg text-slate-900">₹{b.amount}</span>
+                <Badge status={b.status} />
+                {b.status === 'Pending' && (
+                  <button onClick={() => setPayingBill(b)} className="px-5 py-2 bg-slate-900 text-white font-bold text-xs rounded-xl hover:bg-slate-800 transition-all shadow-sm">
+                    {isPatient ? 'Pay Now' : 'Process'}
+                  </button>
+                )}
+              </div>
             </div>
           ))}
+          {bills.length === 0 && (
+            <div className="p-8 text-center text-slate-400">
+              <p>No bills found.</p>
+            </div>
+          )}
         </div>
       </Card>
+
+      {payingBill && (
+        <PaymentModal
+          bill={payingBill}
+          isPatient={isPatient}
+          onClose={() => setPayingBill(null)}
+          onPay={(billId, method) => {
+            onMarkPaid(billId, method);
+            setPayingBill(null);
+          }}
+        />
+      )}
     </div>
   );
 }
@@ -662,7 +827,8 @@ function DoctorRecordsView({ records, appointments, doctor, onAddRecord }) {
       doctor: doctor.name,
       diagnosis: fd.get('diagnosis'),
       prescription: fd.get('prescription'),
-      symptoms: fd.get('symptoms')
+      symptoms: fd.get('symptoms'),
+      requiresAdmission: fd.get('requiresAdmission') === 'on'
     });
 
     e.target.reset();
@@ -680,6 +846,10 @@ function DoctorRecordsView({ records, appointments, doctor, onAddRecord }) {
             <div><label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">Symptoms</label><input name="symptoms" className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg text-sm" /></div>
             <div><label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">Diagnosis</label><input name="diagnosis" required className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg text-sm" /></div>
             <div><label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">Prescription Details</label><textarea name="prescription" required className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg text-sm h-32"></textarea></div>
+            <label className="flex items-center space-x-2 p-3 bg-slate-50 border border-slate-200 rounded-lg cursor-pointer hover:bg-slate-100 transition-colors">
+              <input type="checkbox" name="requiresAdmission" className="h-4 w-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500" />
+              <span className="text-sm font-bold text-slate-700">Recommend Ward Admission</span>
+            </label>
             <button type="submit" className="w-full py-3 bg-blue-600 text-white rounded-xl font-bold text-sm">Save to Record</button>
           </form>
         </Card>
@@ -692,6 +862,234 @@ function DoctorRecordsView({ records, appointments, doctor, onAddRecord }) {
           ))}
         </div>
       </Card>
+    </div>
+  );
+}
+
+function BedManagementView({ beds, pendingAdmissions, onUpdateBed }) {
+  const [selectedPatient, setSelectedPatient] = useState(null);
+
+  const wards = ['ICU', 'General Ward', 'Private Suite'];
+
+  const handleAssign = async (bed) => {
+    if (!selectedPatient || bed.status !== 'Available') return;
+
+    await onUpdateBed(bed.id, {
+      status: 'Occupied',
+      patientName: selectedPatient.patientName,
+      patientEmail: selectedPatient.patientEmail
+    });
+    setSelectedPatient(null);
+  };
+
+  const handleDischarge = async (bed) => {
+    if (bed.status !== 'Occupied') return;
+    await onUpdateBed(bed.id, {
+      status: 'Available',
+      patientName: null,
+      patientEmail: null
+    });
+  };
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+      <Card className="lg:col-span-2 p-6">
+        <h3 className="font-bold text-lg mb-6">Hospital Ward Map</h3>
+        <div className="space-y-8">
+          {wards.map(ward => (
+            <div key={ward}>
+              <h4 className="text-xs font-bold text-slate-400 uppercase tracking-widest mb-4 flex items-center">
+                <span className="w-8 h-px bg-slate-200 mr-3"></span>
+                {ward}
+              </h4>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                {beds.filter(b => b.wardName === ward).map(bed => (
+                  <div
+                    key={bed.id}
+                    onClick={() => bed.status === 'Available' ? handleAssign(bed) : null}
+                    className={`
+                      relative p-4 rounded-2xl border-2 transition-all cursor-pointer group
+                      ${bed.status === 'Available'
+                        ? 'bg-white border-slate-100 hover:border-emerald-400 hover:shadow-lg hover:shadow-emerald-100'
+                        : bed.status === 'Occupied'
+                          ? 'bg-indigo-50 border-indigo-200 shadow-sm'
+                          : 'bg-rose-50 border-rose-100 opacity-60'}
+                    `}
+                  >
+                    <div className="flex justify-between items-start mb-2">
+                      <div className={`p-1.5 rounded-lg ${bed.status === 'Available' ? 'bg-emerald-50 text-emerald-600' : bed.status === 'Occupied' ? 'bg-indigo-100 text-indigo-600' : 'bg-rose-100 text-rose-600'}`}>
+                        <Bed size={16} />
+                      </div>
+                      <span className="text-[10px] font-black text-slate-400">{bed.bedNumber}</span>
+                    </div>
+
+                    {bed.status === 'Occupied' ? (
+                      <div>
+                        <p className="text-sm font-bold text-indigo-900 truncate">{bed.patientName}</p>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); handleDischarge(bed); }}
+                          className="mt-2 text-[10px] font-bold text-indigo-600 hover:text-indigo-800 flex items-center"
+                        >
+                          Discharge <ArrowRight size={10} className="ml-1" />
+                        </button>
+                      </div>
+                    ) : (
+                      <div>
+                        <p className={`text-sm font-bold ${bed.status === 'Available' ? 'text-slate-400' : 'text-rose-400'}`}>
+                          {bed.status}
+                        </p>
+                        {bed.status === 'Available' && selectedPatient && (
+                          <div className="absolute inset-0 bg-emerald-500/10 rounded-2xl border-2 border-emerald-500 animate-pulse flex items-center justify-center">
+                            <span className="text-[10px] font-black text-emerald-600 uppercase">Assign Here</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </Card>
+
+      <Card className="p-6">
+        <h3 className="font-bold text-lg mb-4 flex items-center">
+          <Users size={20} className="mr-2 text-blue-600" />
+          Pending Admissions
+        </h3>
+        <p className="text-xs text-slate-500 mb-6">Select a patient below then click an available bed to allocate.</p>
+
+        <div className="space-y-3">
+          {pendingAdmissions.map((adm) => (
+            <div
+              key={adm.id}
+              onClick={() => setSelectedPatient(selectedPatient?.id === adm.id ? null : adm)}
+              className={`
+                p-4 rounded-xl border-2 transition-all cursor-pointer
+                ${selectedPatient?.id === adm.id
+                  ? 'border-blue-500 bg-blue-50 shadow-md transform -translate-y-1'
+                  : 'border-slate-100 bg-slate-50 hover:border-blue-200'}
+              `}
+            >
+              <div className="flex justify-between items-start mb-1">
+                <p className="font-bold text-slate-900">{adm.patientName}</p>
+                <span className="text-[10px] bg-blue-200 text-blue-700 font-black px-1.5 py-0.5 rounded uppercase">Urgent</span>
+              </div>
+              <p className="text-xs text-slate-500 line-clamp-1">{adm.diagnosis}</p>
+              <div className="mt-3 flex items-center text-[10px] font-bold text-slate-400 uppercase">
+                <Stethoscope size={10} className="mr-1" /> {adm.doctor}
+              </div>
+            </div>
+          ))}
+          {pendingAdmissions.length === 0 && (
+            <div className="py-12 text-center text-slate-400">
+              <ClipboardList size={32} className="mx-auto mb-3 opacity-20" />
+              <p className="text-sm">No pending admissions</p>
+            </div>
+          )}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function FinancialDashboardView({ financials }) {
+  const { revenue, pending, expenses, netProfit, staff, bills } = financials;
+
+  return (
+    <div className="space-y-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <Card className="p-6 bg-emerald-50 border-emerald-100">
+          <div className="flex items-center space-x-3 mb-2">
+            <div className="p-2 bg-emerald-500 rounded-lg text-white"><TrendingUp size={20} /></div>
+            <span className="text-sm font-bold text-emerald-900">Total Revenue</span>
+          </div>
+          <h3 className="text-3xl font-black text-emerald-900">₹{revenue.toLocaleString()}</h3>
+          <p className="text-xs text-emerald-600 mt-1 font-bold">Realized Cash Flow</p>
+        </Card>
+
+        <Card className="p-6 bg-blue-50 border-blue-100">
+          <div className="flex items-center space-x-3 mb-2">
+            <div className="p-2 bg-blue-500 rounded-lg text-white"><Clock size={20} /></div>
+            <span className="text-sm font-bold text-blue-900">Pending Invoices</span>
+          </div>
+          <h3 className="text-3xl font-black text-blue-900">₹{pending.toLocaleString()}</h3>
+          <p className="text-xs text-blue-600 mt-1 font-bold">Awaiting Payment</p>
+        </Card>
+
+        <Card className="p-6 bg-rose-50 border-rose-100">
+          <div className="flex items-center space-x-3 mb-2">
+            <div className="p-2 bg-rose-500 rounded-lg text-white"><Users size={20} /></div>
+            <span className="text-sm font-bold text-rose-900">Total Expenses</span>
+          </div>
+          <h3 className="text-3xl font-black text-rose-900">₹{expenses.toLocaleString()}</h3>
+          <p className="text-xs text-rose-600 mt-1 font-bold">Monthly Staff Salaries</p>
+        </Card>
+
+        <Card className={`p-6 border-2 ${netProfit >= 0 ? 'bg-slate-900 border-slate-900 text-white' : 'bg-red-900 border-red-900 text-white'}`}>
+          <div className="flex items-center space-x-3 mb-2">
+            <div className={`p-2 rounded-lg ${netProfit >= 0 ? 'bg-white/20' : 'bg-white/20'}`}><Activity size={20} /></div>
+            <span className="text-sm font-bold opacity-80">Net Profit</span>
+          </div>
+          <h3 className="text-3xl font-black">₹{netProfit.toLocaleString()}</h3>
+          <p className="text-xs mt-1 font-bold opacity-60">Balance After Expenses</p>
+        </Card>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+        <Card className="lg:col-span-2">
+          <div className="p-6 border-b border-slate-100 flex justify-between items-center">
+            <h3 className="font-black text-slate-800">Staff Payroll & Earnings</h3>
+            <span className="text-[10px] bg-slate-100 px-2 py-1 rounded font-bold uppercase">Monthly Report</span>
+          </div>
+          <div className="divide-y divide-slate-100">
+            {staff.map((s, idx) => (
+              <div key={idx} className="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors">
+                <div className="flex items-center space-x-4">
+                  <div className="h-10 w-10 bg-slate-100 text-slate-700 rounded-full flex items-center justify-center font-bold">{s.name.charAt(0)}</div>
+                  <div>
+                    <p className="font-bold text-slate-900">{s.name}</p>
+                    <p className="text-xs text-slate-500 capitalize">{s.role}</p>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <p className="font-black text-slate-900">₹{s.salary.toLocaleString()}</p>
+                  <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Salary</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+
+        <Card>
+          <div className="p-6 border-b border-slate-100">
+            <h3 className="font-black text-slate-800">Recent Transactions</h3>
+          </div>
+          <div className="p-4 space-y-4">
+            {bills.map((b) => (
+              <div key={b.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl">
+                <div className="flex items-center space-x-3">
+                  <div className={`p-2 rounded-lg ${b.status === 'Paid' ? 'bg-emerald-100 text-emerald-600' : 'bg-blue-100 text-blue-600'}`}>
+                    <CreditCard size={16} />
+                  </div>
+                  <div className="overflow-hidden">
+                    <p className="text-xs font-bold text-slate-900 truncate">{b.patientName}</p>
+                    <p className="text-[10px] text-slate-400">{b.date}</p>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <p className={`text-xs font-black ${b.status === 'Paid' ? 'text-emerald-600' : 'text-slate-900'}`}>
+                    {b.status === 'Paid' ? '+' : ''}₹{b.amount}
+                  </p>
+                  <p className={`text-[8px] font-bold uppercase ${b.status === 'Paid' ? 'text-emerald-400' : 'text-blue-400'}`}>{b.status}</p>
+                </div>
+              </div>
+            ))}
+            {bills.length === 0 && <p className="text-center text-slate-400 text-xs py-10">No recent transactions</p>}
+          </div>
+        </Card>
+      </div>
     </div>
   );
 }
