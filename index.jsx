@@ -4,7 +4,6 @@ import {
   ArrowRight,
   Bell,
   Calendar,
-  ChevronRight,
   ClipboardList,
   Clock,
   CreditCard,
@@ -14,7 +13,6 @@ import {
   LogOut,
   Plus,
   Search,
-  Shield,
   Star,
   Stethoscope,
   Trash2,
@@ -26,7 +24,12 @@ import {
 } from 'lucide-react';
 
 const API_BASE = 'http://localhost:5055/api';
-const LOGIN_EMAILS = ['admin@mail.com', 'doctor@mail.com', 'reception@mail.com', 'patient@mail.com'];
+const ROLE_ALLOWED_VIEWS = {
+  admin: ['dashboard', 'manage_staff'],
+  doctor: ['dashboard', 'doctor_queue', 'doctor_records'],
+  reception: ['dashboard', 'reception_booking', 'reception_billing'],
+  patient: ['dashboard', 'patient_book', 'patient_history']
+};
 
 const Card = ({ children, className = '' }) => (
   <div className={`bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden ${className}`}>{children}</div>
@@ -43,9 +46,20 @@ const Badge = ({ status }) => {
   return <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${styles[status] || 'bg-gray-100 text-gray-700'}`}>{status}</span>;
 };
 
-async function request(path, options = {}) {
+async function request(path, options = {}, authUser = null) {
+  const authHeaders = authUser
+    ? {
+        'x-user-id': authUser.id,
+        'x-user-role': authUser.role
+      }
+    : {};
+
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...authHeaders,
+      ...(options.headers || {})
+    },
     ...options
   });
 
@@ -65,6 +79,14 @@ async function request(path, options = {}) {
 
 export default function App() {
   const [user, setUser] = useState(null);
+  const [authMode, setAuthMode] = useState('login');
+  const [loginForm, setLoginForm] = useState({ email: '', password: '' });
+  const [patientRegistrationForm, setPatientRegistrationForm] = useState({
+    name: '',
+    email: '',
+    password: '',
+    confirmPassword: ''
+  });
   const [view, setView] = useState('dashboard');
   const [doctors, setDoctors] = useState([]);
   const [appointments, setAppointments] = useState([]);
@@ -80,11 +102,11 @@ export default function App() {
     setError('');
     try {
       const [doctorRows, appointmentRows, recordRows, billRows, slots] = await Promise.all([
-        request('/doctors'),
-        request('/appointments'),
-        request('/medical-records'),
-        request('/bills'),
-        request('/time-slots')
+        request('/doctors', {}, activeUser),
+        request('/appointments', {}, activeUser),
+        request('/medical-records', {}, activeUser),
+        request('/bills', {}, activeUser),
+        request('/time-slots', {}, activeUser)
       ]);
 
       setDoctors(doctorRows);
@@ -94,7 +116,7 @@ export default function App() {
       setTimeSlots(slots);
 
       if (activeUser?.id) {
-        const noteRows = await request(`/notifications?userId=${encodeURIComponent(activeUser.id)}`).catch(() => []);
+        const noteRows = await request(`/notifications?userId=${encodeURIComponent(activeUser.id)}`, {}, activeUser).catch(() => []);
         setNotifications(noteRows);
       }
     } catch (err) {
@@ -110,16 +132,75 @@ export default function App() {
     }
   }, [user]);
 
-  const handleLogin = async (email) => {
+  useEffect(() => {
+    if (!user) return;
+    const allowed = ROLE_ALLOWED_VIEWS[user.role] || ['dashboard'];
+    if (!allowed.includes(view)) {
+      setView('dashboard');
+    }
+  }, [user, view]);
+
+  const handleLogin = async (e) => {
+    e.preventDefault();
+
+    const email = loginForm.email.trim();
+    const password = loginForm.password;
+    if (!email || !password) {
+      setError('Please enter both email and password');
+      return;
+    }
+
     setLoading(true);
     setError('');
     try {
       const loggedInUser = await request('/login', {
         method: 'POST',
-        body: JSON.stringify({ email })
+        body: JSON.stringify({ email, password })
       });
       setUser(loggedInUser);
       setView('dashboard');
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handlePatientRegistration = async (e) => {
+    e.preventDefault();
+
+    const name = patientRegistrationForm.name.trim();
+    const email = patientRegistrationForm.email.trim();
+    const password = patientRegistrationForm.password;
+    const confirmPassword = patientRegistrationForm.confirmPassword;
+
+    if (!name || !email || !password || !confirmPassword) {
+      setError('Please complete all registration fields');
+      return;
+    }
+
+    if (password.length < 6) {
+      setError('Password must be at least 6 characters');
+      return;
+    }
+
+    if (password !== confirmPassword) {
+      setError('Passwords do not match');
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+    try {
+      const created = await request('/register/patient', {
+        method: 'POST',
+        body: JSON.stringify({ name, email, password })
+      });
+
+      setUser(created.user);
+      setView('dashboard');
+      setAuthMode('login');
+      setPatientRegistrationForm({ name: '', email: '', password: '', confirmPassword: '' });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -154,14 +235,14 @@ export default function App() {
     const created = await request('/appointments', {
       method: 'POST',
       body: JSON.stringify(payload)
-    });
+    }, user);
 
     setAppointments((prev) => [created, ...prev]);
     if (user?.id) {
       await request('/notifications', {
         method: 'POST',
         body: JSON.stringify({ userId: user.id, text: `New booking: ${created.patientName} with ${doctor.name}` })
-      }).catch(() => undefined);
+      }, user).catch(() => undefined);
       loadAllData(user);
     }
   };
@@ -170,20 +251,28 @@ export default function App() {
     await request(`/appointments/${id}`, {
       method: 'PUT',
       body: JSON.stringify({ status })
-    });
+    }, user);
     setAppointments((prev) => prev.map((item) => (item.id === id ? { ...item, status } : item)));
   };
 
   const createDoctor = async (doctorData) => {
-    await request('/doctors', {
+    await request('/admin/doctors', {
       method: 'POST',
       body: JSON.stringify(doctorData)
-    });
+    }, user);
+    loadAllData(user);
+  };
+
+  const updateDoctor = async (id, doctorData) => {
+    await request(`/doctors/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify(doctorData)
+    }, user);
     loadAllData(user);
   };
 
   const removeDoctor = async (id) => {
-    await request(`/doctors/${id}`, { method: 'DELETE' });
+    await request(`/doctors/${id}`, { method: 'DELETE' }, user);
     setDoctors((prev) => prev.filter((item) => item.id !== id));
   };
 
@@ -191,7 +280,7 @@ export default function App() {
     await request(`/bills/${id}`, {
       method: 'PUT',
       body: JSON.stringify({ status: 'Paid' })
-    });
+    }, user);
     setBills((prev) => prev.map((bill) => (bill.id === id ? { ...bill, status: 'Paid' } : bill)));
   };
 
@@ -199,7 +288,7 @@ export default function App() {
     const created = await request('/bills', {
       method: 'POST',
       body: JSON.stringify(billData)
-    });
+    }, user);
     setBills((prev) => [created, ...prev]);
   };
 
@@ -207,7 +296,7 @@ export default function App() {
     const created = await request('/medical-records', {
       method: 'POST',
       body: JSON.stringify(recordData)
-    });
+    }, user);
     setRecords((prev) => [created, ...prev]);
   };
 
@@ -217,23 +306,119 @@ export default function App() {
         <Card className="w-full max-w-md p-8 space-y-8">
           <div className="text-center">
             <Activity className="mx-auto h-12 w-12 text-blue-600 mb-4" />
-            <h2 className="text-2xl font-bold text-slate-900">MediCare Login</h2>
-            <p className="text-slate-500 mt-2">Select your role to continue</p>
+            <h2 className="text-2xl font-bold text-slate-900">{authMode === 'login' ? 'MediCare Login' : 'Patient Registration'}</h2>
+            <p className="text-slate-500 mt-2">{authMode === 'login' ? 'Enter your credentials to continue' : 'Create your patient account'}</p>
           </div>
           {error && <div className="text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg p-2">{error}</div>}
-          <div className="space-y-3">
-            {LOGIN_EMAILS.map((email) => (
-              <button key={email} disabled={loading} onClick={() => handleLogin(email)} className="w-full flex items-center p-4 bg-white border border-slate-200 rounded-xl hover:border-blue-500 hover:shadow-md transition-all group disabled:opacity-70">
-                <div className="p-2 rounded-lg mr-4 bg-blue-100 text-blue-600">
-                  {email.includes('admin') ? <Shield size={20} /> : email.includes('doctor') ? <Stethoscope size={20} /> : email.includes('reception') ? <Users size={20} /> : <User size={20} />}
-                </div>
-                <div className="text-left flex-1">
-                  <div className="font-semibold text-slate-900">{email}</div>
-                </div>
-                <ChevronRight className="text-slate-300 group-hover:text-blue-500" size={18} />
+          {authMode === 'login' ? (
+            <form onSubmit={handleLogin} className="space-y-4">
+              <div>
+                <label htmlFor="login-email" className="block text-sm font-medium text-slate-700 mb-1">Email</label>
+                <input
+                  id="login-email"
+                  type="email"
+                  autoComplete="username"
+                  value={loginForm.email}
+                  onChange={(e) => setLoginForm((prev) => ({ ...prev, email: e.target.value }))}
+                  placeholder="name@example.com"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                  disabled={loading}
+                />
+              </div>
+              <div>
+                <label htmlFor="login-password" className="block text-sm font-medium text-slate-700 mb-1">Password</label>
+                <input
+                  id="login-password"
+                  type="password"
+                  autoComplete="current-password"
+                  value={loginForm.password}
+                  onChange={(e) => setLoginForm((prev) => ({ ...prev, password: e.target.value }))}
+                  placeholder="Enter your password"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                  disabled={loading}
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full bg-blue-600 text-white font-semibold rounded-xl py-2.5 hover:bg-blue-700 transition-colors disabled:opacity-70"
+              >
+                {loading ? 'Signing in...' : 'Sign In'}
               </button>
-            ))}
-          </div>
+              <p className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-lg p-2">
+                Demo accounts use password: <span className="font-semibold">password123</span>
+              </p>
+            </form>
+          ) : (
+            <form onSubmit={handlePatientRegistration} className="space-y-4">
+              <div>
+                <label htmlFor="register-name" className="block text-sm font-medium text-slate-700 mb-1">Full Name</label>
+                <input
+                  id="register-name"
+                  type="text"
+                  value={patientRegistrationForm.name}
+                  onChange={(e) => setPatientRegistrationForm((prev) => ({ ...prev, name: e.target.value }))}
+                  placeholder="Your name"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                  disabled={loading}
+                />
+              </div>
+              <div>
+                <label htmlFor="register-email" className="block text-sm font-medium text-slate-700 mb-1">Email</label>
+                <input
+                  id="register-email"
+                  type="email"
+                  value={patientRegistrationForm.email}
+                  onChange={(e) => setPatientRegistrationForm((prev) => ({ ...prev, email: e.target.value }))}
+                  placeholder="name@example.com"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                  disabled={loading}
+                />
+              </div>
+              <div>
+                <label htmlFor="register-password" className="block text-sm font-medium text-slate-700 mb-1">Password</label>
+                <input
+                  id="register-password"
+                  type="password"
+                  value={patientRegistrationForm.password}
+                  onChange={(e) => setPatientRegistrationForm((prev) => ({ ...prev, password: e.target.value }))}
+                  placeholder="At least 6 characters"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                  disabled={loading}
+                />
+              </div>
+              <div>
+                <label htmlFor="register-confirm-password" className="block text-sm font-medium text-slate-700 mb-1">Confirm Password</label>
+                <input
+                  id="register-confirm-password"
+                  type="password"
+                  value={patientRegistrationForm.confirmPassword}
+                  onChange={(e) => setPatientRegistrationForm((prev) => ({ ...prev, confirmPassword: e.target.value }))}
+                  placeholder="Re-enter password"
+                  className="w-full rounded-xl border border-slate-200 px-3 py-2.5 text-slate-900 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+                  disabled={loading}
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={loading}
+                className="w-full bg-blue-600 text-white font-semibold rounded-xl py-2.5 hover:bg-blue-700 transition-colors disabled:opacity-70"
+              >
+                {loading ? 'Creating account...' : 'Create Patient Account'}
+              </button>
+            </form>
+          )}
+          <button
+            type="button"
+            onClick={() => {
+              setError('');
+              setAuthMode((prev) => (prev === 'login' ? 'register' : 'login'));
+            }}
+            className="w-full text-sm text-blue-700 hover:underline"
+            disabled={loading}
+          >
+            {authMode === 'login' ? 'New patient? Create account' : 'Already have an account? Sign in'}
+          </button>
         </Card>
       </div>
     );
@@ -252,6 +437,11 @@ export default function App() {
   const scopedBills = user.role === 'patient'
     ? bills.filter((b) => b.patientEmail === user.email)
     : bills;
+
+  const canAccessView = (nextView) => {
+    const allowed = ROLE_ALLOWED_VIEWS[user.role] || ['dashboard'];
+    return allowed.includes(nextView);
+  };
 
   return (
     <div className="min-h-screen bg-slate-50 flex">
@@ -312,18 +502,18 @@ export default function App() {
         {error && <div className="mb-4 text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg p-2">{error}</div>}
 
         {view === 'dashboard' && <DashboardView user={user} appointments={scopedAppointments} doctors={doctors} bills={scopedBills} notifications={notifications} records={scopedRecords} />}
-        {view === 'manage_staff' && <AdminStaffView doctors={doctors} onCreate={createDoctor} onDelete={removeDoctor} />}
-        {view === 'reception_booking' && (
+        {view === 'manage_staff' && canAccessView('manage_staff') && <AdminStaffView doctors={doctors} onCreate={createDoctor} onUpdate={updateDoctor} onDelete={removeDoctor} />}
+        {view === 'reception_booking' && canAccessView('reception_booking') && (
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
             <div className="lg:col-span-2"><AppointmentList appointments={scopedAppointments} onStatusChange={updateApptStatus} /></div>
             <div className="lg:col-span-1"><BookingForm doctors={doctors} onBook={addAppointment} timeSlots={timeSlots} /></div>
           </div>
         )}
-        {view === 'reception_billing' && <BillingView bills={scopedBills} appointments={appointments} onMarkPaid={markBillPaid} onGenerate={createBill} />}
-        {view === 'patient_book' && <PatientBookingView doctors={doctors} onBook={addAppointment} user={user} timeSlots={timeSlots} />}
-        {view === 'patient_history' && <PatientHistoryView records={scopedRecords} />}
-        {view === 'doctor_queue' && <DoctorQueueView appointments={scopedAppointments} setView={setView} />}
-        {view === 'doctor_records' && <DoctorRecordsView records={scopedRecords} appointments={scopedAppointments} doctor={user} onAddRecord={addRecord} />}
+        {view === 'reception_billing' && canAccessView('reception_billing') && <BillingView bills={scopedBills} appointments={appointments} onMarkPaid={markBillPaid} onGenerate={createBill} />}
+        {view === 'patient_book' && canAccessView('patient_book') && <PatientBookingView doctors={doctors} onBook={addAppointment} user={user} timeSlots={timeSlots} />}
+        {view === 'patient_history' && canAccessView('patient_history') && <PatientHistoryView records={scopedRecords} />}
+        {view === 'doctor_queue' && canAccessView('doctor_queue') && <DoctorQueueView appointments={scopedAppointments} setView={setView} />}
+        {view === 'doctor_records' && canAccessView('doctor_records') && <DoctorRecordsView records={scopedRecords} appointments={scopedAppointments} doctor={user} onAddRecord={addRecord} />}
       </main>
     </div>
   );
@@ -337,7 +527,7 @@ function SidebarLink({ icon: Icon, label, active, onClick }) {
   );
 }
 
-function DashboardView({ appointments, doctors, bills, notifications, records }) {
+function DashboardView({ user, appointments, doctors, bills, notifications, records }) {
   const patientCount = useMemo(() => {
     const names = new Set([
       ...appointments.map((a) => a.patientName),
@@ -349,11 +539,34 @@ function DashboardView({ appointments, doctors, bills, notifications, records })
 
   const revenue = useMemo(() => bills.filter((b) => b.status === 'Paid').reduce((sum, b) => sum + Number(b.amount || 0), 0), [bills]);
 
-  const stats = [
-    { label: 'Total Patients', value: patientCount, icon: Users, color: 'blue' },
-    { label: 'Active Staff', value: doctors.length, icon: Stethoscope, color: 'emerald' },
-    { label: 'Revenue', value: `$${revenue.toFixed(2)}`, icon: TrendingUp, color: 'purple' }
-  ];
+  const pendingBills = useMemo(() => bills.filter((b) => b.status === 'Pending').length, [bills]);
+  const scheduledAppointments = useMemo(() => appointments.filter((a) => a.status === 'Scheduled').length, [appointments]);
+  const completedAppointments = useMemo(() => appointments.filter((a) => a.status === 'Completed').length, [appointments]);
+
+  const statsByRole = {
+    admin: [
+      { label: 'Total Patients', value: patientCount, icon: Users },
+      { label: 'Active Staff', value: doctors.length, icon: Stethoscope },
+      { label: 'Revenue', value: `$${revenue.toFixed(2)}`, icon: TrendingUp }
+    ],
+    doctor: [
+      { label: 'Scheduled Queue', value: scheduledAppointments, icon: Clock },
+      { label: 'Completed Visits', value: completedAppointments, icon: ClipboardList },
+      { label: 'Records Authored', value: records.length, icon: FileText }
+    ],
+    reception: [
+      { label: 'Appointments', value: appointments.length, icon: Calendar },
+      { label: 'Pending Bills', value: pendingBills, icon: CreditCard },
+      { label: 'Registered Patients', value: patientCount, icon: Users }
+    ],
+    patient: [
+      { label: 'My Appointments', value: appointments.length, icon: Calendar },
+      { label: 'My Records', value: records.length, icon: FileText },
+      { label: 'Pending Bills', value: pendingBills, icon: CreditCard }
+    ]
+  };
+
+  const stats = statsByRole[user.role] || statsByRole.patient;
 
   return (
     <div className="space-y-6">
@@ -391,17 +604,49 @@ function DashboardView({ appointments, doctors, bills, notifications, records })
   );
 }
 
-function AdminStaffView({ doctors, onCreate, onDelete }) {
+function AdminStaffView({ doctors, onCreate, onUpdate, onDelete }) {
+  const [formError, setFormError] = useState('');
+  const [tagDrafts, setTagDrafts] = useState({});
+
+  useEffect(() => {
+    setTagDrafts((prev) => {
+      const next = { ...prev };
+      doctors.forEach((doc) => {
+        if (next[doc.id] === undefined) {
+          next[doc.id] = doc.tags || '';
+        }
+      });
+      return next;
+    });
+  }, [doctors]);
+
   const addDoc = async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
-    await onCreate({
-      name: fd.get('name'),
-      specialty: fd.get('specialty'),
-      email: fd.get('email'),
-      rating: Number(fd.get('rating') || 4.5)
-    });
-    e.target.reset();
+
+    try {
+      setFormError('');
+      await onCreate({
+        name: fd.get('name'),
+        specialty: fd.get('specialty'),
+        email: fd.get('email'),
+        tags: fd.get('tags'),
+        password: fd.get('password'),
+        rating: Number(fd.get('rating') || 4.5)
+      });
+      e.target.reset();
+    } catch (err) {
+      setFormError(err.message || 'Unable to create doctor account');
+    }
+  };
+
+  const saveDoctorTags = async (docId) => {
+    try {
+      setFormError('');
+      await onUpdate(docId, { tags: (tagDrafts[docId] || '').trim() });
+    } catch (err) {
+      setFormError(err.message || 'Unable to update doctor tags');
+    }
   };
 
   return (
@@ -414,9 +659,27 @@ function AdminStaffView({ doctors, onCreate, onDelete }) {
         <div className="divide-y divide-slate-100">
           {doctors.map((doc) => (
             <div key={doc.id} className="p-4 flex items-center justify-between hover:bg-slate-50 group">
-              <div className="flex items-center space-x-4">
+              <div className="flex items-center space-x-4 flex-1">
                 <div className="h-10 w-10 bg-blue-100 text-blue-700 rounded-lg flex items-center justify-center font-bold">{doc.name.charAt(0)}</div>
-                <div><p className="font-bold text-slate-900">{doc.name}</p><p className="text-xs text-slate-500">{doc.specialty}</p></div>
+                <div className="min-w-0 flex-1">
+                  <p className="font-bold text-slate-900">{doc.name}</p>
+                  <p className="text-xs text-slate-500">{doc.specialty}</p>
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {(doc.tags || '').split(',').map((tag) => tag.trim()).filter(Boolean).map((tag) => (
+                      <span key={`${doc.id}-${tag}`} className="text-[10px] bg-blue-50 text-blue-700 border border-blue-100 rounded-full px-2 py-0.5">{tag}</span>
+                    ))}
+                    {!(doc.tags || '').trim() && <span className="text-[10px] text-slate-400">No tags assigned</span>}
+                  </div>
+                  <div className="mt-2 flex items-center gap-2">
+                    <input
+                      value={tagDrafts[doc.id] ?? ''}
+                      onChange={(e) => setTagDrafts((prev) => ({ ...prev, [doc.id]: e.target.value }))}
+                      placeholder="Add tags: fever, cough, allergy"
+                      className="w-full max-w-md p-2 bg-white border border-slate-200 rounded-lg text-xs"
+                    />
+                    <button type="button" onClick={() => saveDoctorTags(doc.id)} className="px-3 py-2 text-xs bg-slate-900 text-white rounded-lg hover:bg-slate-800">Save Tags</button>
+                  </div>
+                </div>
               </div>
               <div className="flex items-center space-x-6">
                 <div className="text-right hidden sm:block">
@@ -431,12 +694,15 @@ function AdminStaffView({ doctors, onCreate, onDelete }) {
       </Card>
       <Card className="p-6">
         <h3 className="font-bold mb-4 flex items-center"><UserPlus size={18} className="mr-2 text-blue-500" /> Onboard Staff</h3>
+        {formError && <div className="text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg p-2 mb-3">{formError}</div>}
         <form onSubmit={addDoc} className="space-y-4">
           <div><label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">Doctor Name</label><input name="name" required className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg text-sm" /></div>
           <div><label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">Email</label><input name="email" type="email" required className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg text-sm" /></div>
+          <div><label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">Account Password</label><input name="password" type="password" minLength="6" required className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg text-sm" /></div>
           <div><label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">Specialty</label><input name="specialty" required className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg text-sm" /></div>
+          <div><label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">Condition Tags</label><input name="tags" placeholder="fever, cough, skin rash" className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg text-sm" /></div>
           <div><label className="text-[10px] font-bold text-slate-400 uppercase block mb-1">Rating</label><input name="rating" type="number" min="1" max="5" step="0.1" defaultValue="4.5" className="w-full p-2 bg-slate-50 border border-slate-200 rounded-lg text-sm" /></div>
-          <button type="submit" className="w-full py-3 bg-blue-600 text-white rounded-xl font-bold text-sm hover:bg-blue-700 transition-all">Onboard to System</button>
+          <button type="submit" className="w-full py-3 bg-blue-600 text-white rounded-xl font-bold text-sm hover:bg-blue-700 transition-all">Create Doctor Account</button>
         </form>
       </Card>
     </div>
@@ -448,10 +714,16 @@ function PatientBookingView({ doctors, onBook, user, timeSlots }) {
   const [selectedDoc, setSelectedDoc] = useState(null);
   const [selectedSlot, setSelectedSlot] = useState(null);
 
-  const matchedDoc = useMemo(() => {
-    if (!query) return null;
-    const q = query.toLowerCase();
-    return doctors.find((d) => d.specialty.toLowerCase().includes(q) || d.name.toLowerCase().includes(q));
+  const matchedDoctors = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return doctors;
+
+    return doctors.filter((doctor) => {
+      const tags = (doctor.tags || '').toLowerCase();
+      return doctor.name.toLowerCase().includes(q)
+        || doctor.specialty.toLowerCase().includes(q)
+        || tags.includes(q);
+    });
   }, [query, doctors]);
 
   const handleComplete = async () => {
@@ -473,31 +745,47 @@ function PatientBookingView({ doctors, onBook, user, timeSlots }) {
     <div className="max-w-4xl mx-auto space-y-8">
       <div className="text-center space-y-2">
         <h2 className="text-3xl font-bold">How can we help you today?</h2>
-        <p className="text-slate-500">Describe your symptoms and we'll match you with a specialist.</p>
+        <p className="text-slate-500">Search by condition, specialty, or doctor name, then pick your doctor and slot.</p>
       </div>
       <div className="relative max-w-2xl mx-auto">
         <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" size={24} />
         <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder="e.g. headache, fever, chest pain" className="w-full pl-14 pr-6 py-5 bg-white shadow-xl rounded-2xl border-none text-lg outline-none ring-2 ring-transparent focus:ring-blue-500 transition-all" />
       </div>
-      {matchedDoc && !selectedDoc && (
-        <Card className="p-6 border-blue-500 border-2">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-4">
-              <div className="h-16 w-16 bg-blue-100 rounded-2xl flex items-center justify-center text-blue-600 font-bold text-2xl">{matchedDoc.name.charAt(0)}</div>
-              <div>
-                <span className="text-xs bg-blue-100 text-blue-600 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">Expert Match</span>
-                <h3 className="text-xl font-bold text-slate-900 mt-1">{matchedDoc.name}</h3>
-                <p className="text-slate-500">{matchedDoc.specialty}</p>
+      {!selectedDoc && (
+        <div className="space-y-3">
+          {matchedDoctors.map((doctor) => (
+            <Card key={doctor.id} className="p-5">
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex items-center space-x-4">
+                  <div className="h-14 w-14 bg-blue-100 rounded-2xl flex items-center justify-center text-blue-600 font-bold text-xl">{doctor.name.charAt(0)}</div>
+                  <div>
+                    <h3 className="text-lg font-bold text-slate-900">{doctor.name}</h3>
+                    <p className="text-sm text-slate-500">{doctor.specialty}</p>
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {(doctor.tags || '').split(',').map((tag) => tag.trim()).filter(Boolean).map((tag) => (
+                        <span key={`${doctor.id}-${tag}`} className="text-[10px] bg-blue-50 text-blue-700 border border-blue-100 rounded-full px-2 py-0.5">{tag}</span>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+                <button onClick={() => { setSelectedDoc(doctor); setSelectedSlot(null); }} className="px-5 py-2.5 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 transition-all flex items-center whitespace-nowrap">Choose Doctor <ArrowRight size={16} className="ml-2" /></button>
               </div>
-            </div>
-            <button onClick={() => setSelectedDoc(matchedDoc)} className="px-6 py-3 bg-blue-600 text-white rounded-xl font-bold hover:bg-blue-700 transition-all flex items-center">Choose Doctor <ArrowRight size={18} className="ml-2" /></button>
-          </div>
-        </Card>
+            </Card>
+          ))}
+          {matchedDoctors.length === 0 && (
+            <Card className="p-6 text-center text-slate-500">
+              No doctors found for this condition. Try another keyword.
+            </Card>
+          )}
+        </div>
       )}
       {selectedDoc && (
         <Card className="p-8">
           <div className="flex justify-between items-start mb-8">
-            <h3 className="text-2xl font-bold">Select Appointment Time</h3>
+            <div>
+              <h3 className="text-2xl font-bold">Select Appointment Time</h3>
+              <p className="text-slate-500 mt-1">{selectedDoc.name} • {selectedDoc.specialty}</p>
+            </div>
             <button onClick={() => setSelectedDoc(null)} className="p-2 hover:bg-slate-100 rounded-full"><X size={20} /></button>
           </div>
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">

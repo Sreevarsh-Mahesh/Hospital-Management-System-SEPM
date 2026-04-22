@@ -22,6 +22,34 @@ const db = new sqlite3.Database(dbPath, (err) => {
   initializeDatabase();
 });
 
+function requireAuth(req, res, next) {
+  const userId = req.header('x-user-id');
+  const userRole = req.header('x-user-role');
+
+  if (!userId || !userRole) {
+    return res.status(401).json({ error: 'Authentication required' });
+  }
+
+  db.get('SELECT id, email, name, role FROM users WHERE id = ?', [userId], (err, user) => {
+    if (err) return res.status(500).json({ error: err.message });
+    if (!user) return res.status(401).json({ error: 'Invalid user session' });
+    if (user.role !== userRole) return res.status(403).json({ error: 'Role mismatch' });
+
+    req.authUser = user;
+    next();
+  });
+}
+
+function requireRole(roles) {
+  return (req, res, next) => {
+    if (!req.authUser) return res.status(401).json({ error: 'Authentication required' });
+    if (!roles.includes(req.authUser.role)) {
+      return res.status(403).json({ error: 'You do not have access to this route' });
+    }
+    next();
+  };
+}
+
 // Initialize Database Schema
 function initializeDatabase() {
   db.serialize(() => {
@@ -45,11 +73,21 @@ function initializeDatabase() {
         name TEXT NOT NULL,
         specialty TEXT NOT NULL,
         email TEXT UNIQUE NOT NULL,
+        tags TEXT DEFAULT '',
         rating REAL DEFAULT 4.5,
         phone TEXT,
         createdAt DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `);
+
+    // Backward-compatible migration for existing databases created before tags existed.
+    db.all('PRAGMA table_info(doctors)', (tableErr, columns) => {
+      if (tableErr) return;
+      const hasTags = columns.some((column) => column.name === 'tags');
+      if (!hasTags) {
+        db.run("ALTER TABLE doctors ADD COLUMN tags TEXT DEFAULT ''");
+      }
+    });
 
     // Appointments table
     db.run(`
@@ -139,16 +177,16 @@ function seedInitialData() {
 
       // Insert doctors
       const doctors = [
-        { name: 'Dr. Sarah Wilson', specialty: 'Cardiology', email: 'sarah.wilson@hospital.com', rating: 4.9 },
-        { name: 'Dr. Michael Chen', specialty: 'Neurology', email: 'michael.chen@hospital.com', rating: 4.8 },
-        { name: 'Dr. Emily Brooks', specialty: 'Pediatrics', email: 'emily.brooks@hospital.com', rating: 5.0 },
-        { name: 'Dr. John Doe', specialty: 'General Physician', email: 'john.doe@hospital.com', rating: 4.7 }
+        { name: 'Dr. Sarah Wilson', specialty: 'Cardiology', email: 'sarah.wilson@hospital.com', tags: 'chest pain,heart,blood pressure', rating: 4.9 },
+        { name: 'Dr. Michael Chen', specialty: 'Neurology', email: 'michael.chen@hospital.com', tags: 'headache,migraine,nerve pain', rating: 4.8 },
+        { name: 'Dr. Emily Brooks', specialty: 'Pediatrics', email: 'emily.brooks@hospital.com', tags: 'fever,child health,vaccination', rating: 5.0 },
+        { name: 'Dr. John Doe', specialty: 'General Physician', email: 'john.doe@hospital.com', tags: 'cold,cough,checkup', rating: 4.7 }
       ];
 
       doctors.forEach(doctor => {
         db.run(
-          'INSERT INTO doctors (name, specialty, email, rating) VALUES (?, ?, ?, ?)',
-          [doctor.name, doctor.specialty, doctor.email, doctor.rating]
+          'INSERT INTO doctors (name, specialty, email, tags, rating) VALUES (?, ?, ?, ?, ?)',
+          [doctor.name, doctor.specialty, doctor.email, doctor.tags || '', doctor.rating]
         );
       });
 
@@ -184,54 +222,232 @@ function seedInitialData() {
   });
 }
 
+// --- BACKEND INFO / SIMPLE ADMIN VIEW ---
+app.get('/', (req, res) => {
+  res.json({
+    service: 'Hospital Management System API',
+    status: 'running',
+    docs: {
+      health: '/api/health',
+      summary: '/api/admin/summary',
+      users: '/api/users',
+      doctors: '/api/doctors',
+      appointments: '/api/appointments',
+      bills: '/api/bills'
+    }
+  });
+});
+
+app.get('/api/health', (req, res) => {
+  res.json({ ok: true, timestamp: new Date().toISOString() });
+});
+
+app.get('/api/users', requireAuth, requireRole(['admin']), (req, res) => {
+  db.all(
+    'SELECT id, email, name, role, specialty, createdAt FROM users ORDER BY createdAt DESC',
+    (err, rows) => {
+      if (err) return res.status(500).json({ error: err.message });
+      res.json(rows);
+    }
+  );
+});
+
+app.get('/api/admin/summary', requireAuth, requireRole(['admin']), (req, res) => {
+  const summary = {
+    users: 0,
+    doctors: 0,
+    appointments: 0,
+    medicalRecords: 0,
+    bills: 0
+  };
+
+  db.serialize(() => {
+    db.get('SELECT COUNT(*) AS count FROM users', (usersErr, usersRow) => {
+      if (usersErr) return res.status(500).json({ error: usersErr.message });
+      summary.users = usersRow.count;
+
+      db.get('SELECT COUNT(*) AS count FROM doctors', (doctorsErr, doctorsRow) => {
+        if (doctorsErr) return res.status(500).json({ error: doctorsErr.message });
+        summary.doctors = doctorsRow.count;
+
+        db.get('SELECT COUNT(*) AS count FROM appointments', (appointmentsErr, appointmentsRow) => {
+          if (appointmentsErr) return res.status(500).json({ error: appointmentsErr.message });
+          summary.appointments = appointmentsRow.count;
+
+          db.get('SELECT COUNT(*) AS count FROM medical_records', (recordsErr, recordsRow) => {
+            if (recordsErr) return res.status(500).json({ error: recordsErr.message });
+            summary.medicalRecords = recordsRow.count;
+
+            db.get('SELECT COUNT(*) AS count FROM bills', (billsErr, billsRow) => {
+              if (billsErr) return res.status(500).json({ error: billsErr.message });
+              summary.bills = billsRow.count;
+
+              res.json(summary);
+            });
+          });
+        });
+      });
+    });
+  });
+});
+
+app.post('/api/register/patient', (req, res) => {
+  const { name, email, password } = req.body;
+
+  if (!name || !email || !password) {
+    return res.status(400).json({ error: 'Name, email and password are required' });
+  }
+
+  db.get('SELECT id FROM users WHERE email = ?', [email], (checkErr, existingUser) => {
+    if (checkErr) return res.status(500).json({ error: checkErr.message });
+    if (existingUser) return res.status(409).json({ error: 'An account with this email already exists' });
+
+    const userId = uuidv4();
+    db.run(
+      'INSERT INTO users (id, email, name, role, specialty, password) VALUES (?, ?, ?, ?, ?, ?)',
+      [userId, email, name, 'patient', null, password],
+      (insertErr) => {
+        if (insertErr) return res.status(500).json({ error: insertErr.message });
+
+        db.get(
+          'SELECT id, email, name, role, specialty, createdAt FROM users WHERE id = ?',
+          [userId],
+          (fetchErr, safeUser) => {
+            if (fetchErr) return res.status(500).json({ error: fetchErr.message });
+            return res.status(201).json({ message: 'Patient account created', user: safeUser });
+          }
+        );
+      }
+    );
+  });
+});
+
+app.post('/api/admin/doctors', requireAuth, requireRole(['admin']), (req, res) => {
+  const { name, specialty, email, tags, rating, password } = req.body;
+
+  if (!name || !specialty || !email || !password) {
+    return res.status(400).json({ error: 'Name, specialty, email and password are required' });
+  }
+
+  db.get('SELECT id FROM users WHERE email = ?', [email], (userCheckErr, existingUser) => {
+    if (userCheckErr) return res.status(500).json({ error: userCheckErr.message });
+    if (existingUser) return res.status(409).json({ error: 'A user account with this email already exists' });
+
+    db.get('SELECT id FROM doctors WHERE email = ?', [email], (docCheckErr, existingDoctor) => {
+      if (docCheckErr) return res.status(500).json({ error: docCheckErr.message });
+      if (existingDoctor) return res.status(409).json({ error: 'A doctor profile with this email already exists' });
+
+      const userId = uuidv4();
+      db.run(
+        'INSERT INTO users (id, email, name, role, specialty, password) VALUES (?, ?, ?, ?, ?, ?)',
+        [userId, email, name, 'doctor', specialty, password],
+        (userInsertErr) => {
+          if (userInsertErr) return res.status(500).json({ error: userInsertErr.message });
+
+          db.run(
+            'INSERT INTO doctors (name, specialty, email, tags, rating) VALUES (?, ?, ?, ?, ?)',
+            [name, specialty, email, tags || '', Number(rating || 4.5)],
+            function doctorInsertCallback(doctorInsertErr) {
+              if (doctorInsertErr) {
+                db.run('DELETE FROM users WHERE id = ?', [userId]);
+                return res.status(500).json({ error: doctorInsertErr.message });
+              }
+
+              return res.status(201).json({
+                message: 'Doctor account created',
+                doctor: {
+                  id: this.lastID,
+                  name,
+                  specialty,
+                  email,
+                  tags: tags || '',
+                  rating: Number(rating || 4.5)
+                },
+                user: {
+                  id: userId,
+                  name,
+                  email,
+                  role: 'doctor',
+                  specialty
+                }
+              });
+            }
+          );
+        }
+      );
+    });
+  });
+});
+
 // --- AUTHENTICATION ENDPOINTS ---
 app.post('/api/login', (req, res) => {
-  const { email } = req.body;
+  const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ error: 'Email and password are required' });
+  }
   
   db.get('SELECT * FROM users WHERE email = ?', [email], (err, row) => {
     if (err) return res.status(500).json({ error: err.message });
-    if (!row) return res.status(401).json({ error: 'User not found' });
+    if (!row) return res.status(401).json({ error: 'Invalid email or password' });
+    if (row.password !== password) return res.status(401).json({ error: 'Invalid email or password' });
+
+    const { password: _password, ...safeUser } = row;
     
-    res.json(row);
+    res.json(safeUser);
   });
 });
 
 // --- DOCTORS ENDPOINTS ---
-app.get('/api/doctors', (req, res) => {
+app.get('/api/doctors', requireAuth, (req, res) => {
   db.all('SELECT * FROM doctors', (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
     res.json(rows);
   });
 });
 
-app.post('/api/doctors', (req, res) => {
-  const { name, specialty, email, rating } = req.body;
+app.post('/api/doctors', requireAuth, requireRole(['admin']), (req, res) => {
+  const { name, specialty, email, tags, rating } = req.body;
   
   db.run(
-    'INSERT INTO doctors (name, specialty, email, rating) VALUES (?, ?, ?, ?)',
-    [name, specialty, email, rating || 4.5],
+    'INSERT INTO doctors (name, specialty, email, tags, rating) VALUES (?, ?, ?, ?, ?)',
+    [name, specialty, email, tags || '', rating || 4.5],
     function(err) {
       if (err) return res.status(500).json({ error: err.message });
-      res.json({ id: this.lastID, name, specialty, email, rating });
+      res.json({ id: this.lastID, name, specialty, email, tags: tags || '', rating });
     }
   );
 });
 
-app.put('/api/doctors/:id', (req, res) => {
+app.put('/api/doctors/:id', requireAuth, requireRole(['admin']), (req, res) => {
   const { id } = req.params;
-  const { name, specialty, email, rating } = req.body;
-  
-  db.run(
-    'UPDATE doctors SET name = ?, specialty = ?, email = ?, rating = ? WHERE id = ?',
-    [name, specialty, email, rating, id],
-    (err) => {
-      if (err) return res.status(500).json({ error: err.message });
-      res.json({ id, name, specialty, email, rating });
-    }
-  );
+  const { name, specialty, email, tags, rating } = req.body;
+
+  const fields = [];
+  const values = [];
+
+  if (name !== undefined) { fields.push('name = ?'); values.push(name); }
+  if (specialty !== undefined) { fields.push('specialty = ?'); values.push(specialty); }
+  if (email !== undefined) { fields.push('email = ?'); values.push(email); }
+  if (tags !== undefined) { fields.push('tags = ?'); values.push(tags); }
+  if (rating !== undefined) { fields.push('rating = ?'); values.push(rating); }
+
+  if (fields.length === 0) {
+    return res.status(400).json({ error: 'No doctor fields provided for update' });
+  }
+
+  values.push(id);
+  db.run(`UPDATE doctors SET ${fields.join(', ')} WHERE id = ?`, values, (err) => {
+    if (err) return res.status(500).json({ error: err.message });
+
+    db.get('SELECT * FROM doctors WHERE id = ?', [id], (fetchErr, doctorRow) => {
+      if (fetchErr) return res.status(500).json({ error: fetchErr.message });
+      return res.json(doctorRow);
+    });
+  });
 });
 
-app.delete('/api/doctors/:id', (req, res) => {
+app.delete('/api/doctors/:id', requireAuth, requireRole(['admin']), (req, res) => {
   const { id } = req.params;
   
   db.run('DELETE FROM doctors WHERE id = ?', [id], (err) => {
@@ -241,12 +457,18 @@ app.delete('/api/doctors/:id', (req, res) => {
 });
 
 // --- APPOINTMENTS ENDPOINTS ---
-app.get('/api/appointments', (req, res) => {
+app.get('/api/appointments', requireAuth, (req, res) => {
   const { email } = req.query;
   let query = 'SELECT * FROM appointments';
   let params = [];
-  
-  if (email) {
+
+  if (req.authUser.role === 'patient') {
+    query += ' WHERE patientEmail = ?';
+    params = [req.authUser.email];
+  } else if (req.authUser.role === 'doctor') {
+    query += ' WHERE doctorName = ?';
+    params = [req.authUser.name];
+  } else if (email) {
     query += ' WHERE patientEmail = ?';
     params = [email];
   }
@@ -257,7 +479,7 @@ app.get('/api/appointments', (req, res) => {
   });
 });
 
-app.post('/api/appointments', (req, res) => {
+app.post('/api/appointments', requireAuth, (req, res) => {
   const { patientName, patientEmail, doctorId, doctorName, date, time, type } = req.body;
   
   db.run(
@@ -271,7 +493,7 @@ app.post('/api/appointments', (req, res) => {
   );
 });
 
-app.put('/api/appointments/:id', (req, res) => {
+app.put('/api/appointments/:id', requireAuth, (req, res) => {
   const { id } = req.params;
   const { status, date, time, type, notes } = req.body;
   
@@ -292,7 +514,7 @@ app.put('/api/appointments/:id', (req, res) => {
   });
 });
 
-app.delete('/api/appointments/:id', (req, res) => {
+app.delete('/api/appointments/:id', requireAuth, (req, res) => {
   const { id } = req.params;
   
   db.run('DELETE FROM appointments WHERE id = ?', [id], (err) => {
@@ -302,12 +524,15 @@ app.delete('/api/appointments/:id', (req, res) => {
 });
 
 // --- MEDICAL RECORDS ENDPOINTS ---
-app.get('/api/medical-records', (req, res) => {
+app.get('/api/medical-records', requireAuth, (req, res) => {
   const { email } = req.query;
   let query = 'SELECT * FROM medical_records';
   let params = [];
-  
-  if (email) {
+
+  if (req.authUser.role === 'patient') {
+    query += ' WHERE patientEmail = ?';
+    params = [req.authUser.email];
+  } else if (email) {
     query += ' WHERE patientEmail = ?';
     params = [email];
   }
@@ -318,7 +543,7 @@ app.get('/api/medical-records', (req, res) => {
   });
 });
 
-app.post('/api/medical-records', (req, res) => {
+app.post('/api/medical-records', requireAuth, requireRole(['doctor', 'admin']), (req, res) => {
   const { patientName, patientEmail, date, doctor, diagnosis, prescription, symptoms, notes } = req.body;
   
   db.run(
@@ -332,7 +557,7 @@ app.post('/api/medical-records', (req, res) => {
   );
 });
 
-app.delete('/api/medical-records/:id', (req, res) => {
+app.delete('/api/medical-records/:id', requireAuth, requireRole(['doctor', 'admin']), (req, res) => {
   const { id } = req.params;
   
   db.run('DELETE FROM medical_records WHERE id = ?', [id], (err) => {
@@ -342,12 +567,15 @@ app.delete('/api/medical-records/:id', (req, res) => {
 });
 
 // --- BILLS ENDPOINTS ---
-app.get('/api/bills', (req, res) => {
+app.get('/api/bills', requireAuth, (req, res) => {
   const { email } = req.query;
   let query = 'SELECT * FROM bills';
   let params = [];
-  
-  if (email) {
+
+  if (req.authUser.role === 'patient') {
+    query += ' WHERE patientEmail = ?';
+    params = [req.authUser.email];
+  } else if (email) {
     query += ' WHERE patientEmail = ?';
     params = [email];
   }
@@ -358,7 +586,7 @@ app.get('/api/bills', (req, res) => {
   });
 });
 
-app.post('/api/bills', (req, res) => {
+app.post('/api/bills', requireAuth, requireRole(['reception', 'admin']), (req, res) => {
   const { patientName, patientEmail, amount, service, dueDate } = req.body;
   const date = new Date().toISOString().split('T')[0];
   
@@ -373,7 +601,7 @@ app.post('/api/bills', (req, res) => {
   );
 });
 
-app.put('/api/bills/:id', (req, res) => {
+app.put('/api/bills/:id', requireAuth, requireRole(['reception', 'admin']), (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
   
@@ -383,7 +611,7 @@ app.put('/api/bills/:id', (req, res) => {
   });
 });
 
-app.delete('/api/bills/:id', (req, res) => {
+app.delete('/api/bills/:id', requireAuth, requireRole(['reception', 'admin']), (req, res) => {
   const { id } = req.params;
   
   db.run('DELETE FROM bills WHERE id = ?', [id], (err) => {
@@ -393,8 +621,12 @@ app.delete('/api/bills/:id', (req, res) => {
 });
 
 // --- NOTIFICATIONS ENDPOINTS ---
-app.get('/api/notifications', (req, res) => {
+app.get('/api/notifications', requireAuth, (req, res) => {
   const { userId } = req.query;
+
+  if (req.authUser.role !== 'admin' && req.authUser.id !== userId) {
+    return res.status(403).json({ error: 'You can only view your own notifications' });
+  }
   
   db.all('SELECT * FROM notifications WHERE userId = ? ORDER BY time DESC', [userId], (err, rows) => {
     if (err) return res.status(500).json({ error: err.message });
@@ -402,8 +634,12 @@ app.get('/api/notifications', (req, res) => {
   });
 });
 
-app.post('/api/notifications', (req, res) => {
+app.post('/api/notifications', requireAuth, (req, res) => {
   const { userId, text } = req.body;
+
+  if (req.authUser.role !== 'admin' && req.authUser.id !== userId) {
+    return res.status(403).json({ error: 'You can only create your own notifications' });
+  }
   
   db.run(
     'INSERT INTO notifications (userId, text) VALUES (?, ?)',
@@ -416,7 +652,7 @@ app.post('/api/notifications', (req, res) => {
 });
 
 // --- TIME SLOTS ENDPOINT ---
-app.get('/api/time-slots', (req, res) => {
+app.get('/api/time-slots', requireAuth, (req, res) => {
   const slots = ['09:00', '10:00', '11:00', '13:00', '14:00', '15:00', '16:00'];
   res.json(slots);
 });
