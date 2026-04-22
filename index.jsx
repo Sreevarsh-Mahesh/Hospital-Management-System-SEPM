@@ -21,8 +21,24 @@ import {
   UserPlus,
   Users,
   X,
-  Bed
+  Bed,
+  Shield,
+  BarChart3,
+  PieChart as PieChartIcon
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
+import {
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell
+} from 'recharts';
 
 const API_BASE = 'http://localhost:5055/api';
 const ROLE_ALLOWED_VIEWS = {
@@ -100,6 +116,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [financials, setFinancials] = useState(null);
+  const [analytics, setAnalytics] = useState({ trends: [], stats: [] });
 
   const loadAllData = async (activeUser) => {
     setLoading(true);
@@ -128,8 +145,13 @@ export default function App() {
         setNotifications(noteRows);
 
         if (activeUser.role === 'admin') {
-          const finData = await request('/financials').catch(() => null);
+          const [finData, trends, stats] = await Promise.all([
+            request('/financials'),
+            request('/analytics/financial-trends'),
+            request('/analytics/appointment-stats')
+          ]).catch(() => [null, [], []]);
           setFinancials(finData);
+          setAnalytics({ trends: trends || [], stats: stats || [] });
         }
       }
     } catch (err) {
@@ -545,22 +567,32 @@ export default function App() {
         {loading && <div className="mb-4 text-sm text-slate-500">Loading data...</div>}
         {error && <div className="mb-4 text-sm text-red-600 bg-red-50 border border-red-100 rounded-lg p-2">{error}</div>}
 
-        {view === 'dashboard' && <DashboardView user={user} appointments={scopedAppointments} doctors={doctors} bills={scopedBills} notifications={notifications} records={scopedRecords} />}
-        {view === 'manage_staff' && canAccessView('manage_staff') && <AdminStaffView doctors={doctors} onCreate={createDoctor} onUpdate={updateDoctor} onDelete={removeDoctor} />}
-        {view === 'reception_booking' && canAccessView('reception_booking') && (
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-            <div className="lg:col-span-2"><AppointmentList appointments={scopedAppointments} onStatusChange={updateApptStatus} /></div>
-            <div className="lg:col-span-1"><BookingForm doctors={doctors} onBook={addAppointment} timeSlots={timeSlots} /></div>
-          </div>
-        )}
-        {view === 'reception_billing' && canAccessView('reception_billing') && <BillingView bills={scopedBills} appointments={appointments} onMarkPaid={markBillPaid} onGenerate={createBill} isPatient={false} />}
-        {view === 'patient_billing' && canAccessView('patient_billing') && <BillingView bills={scopedBills} appointments={appointments} onMarkPaid={markBillPaid} isPatient={true} />}
-        {view === 'patient_book' && canAccessView('patient_book') && <PatientBookingView doctors={doctors} onBook={addAppointment} user={user} timeSlots={timeSlots} />}
-        {view === 'patient_history' && canAccessView('patient_history') && <PatientHistoryView records={scopedRecords} />}
-        {view === 'doctor_queue' && canAccessView('doctor_queue') && <DoctorQueueView appointments={scopedAppointments} setView={setView} />}
-        {view === 'doctor_records' && canAccessView('doctor_records') && <DoctorRecordsView records={scopedRecords} appointments={scopedAppointments} doctor={user} onAddRecord={addRecord} />}
-        {(view === 'admin_beds' || view === 'reception_beds') && canAccessView(view) && <BedManagementView beds={beds} pendingAdmissions={pendingAdmissions} onUpdateBed={updateBed} />}
-        {view === 'financials' && canAccessView('financials') && financials && <FinancialDashboardView financials={financials} />}
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={view}
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            transition={{ duration: 0.2 }}
+          >
+            {view === 'dashboard' && <DashboardView user={user} appointments={scopedAppointments} doctors={doctors} bills={scopedBills} notifications={notifications} records={scopedRecords} analytics={analytics} />}
+            {view === 'manage_staff' && canAccessView('manage_staff') && <AdminStaffView doctors={doctors} onCreate={createDoctor} onUpdate={updateDoctor} onDelete={removeDoctor} />}
+            {view === 'reception_booking' && canAccessView('reception_booking') && (
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <div className="lg:col-span-2"><AppointmentList appointments={scopedAppointments} onStatusChange={updateApptStatus} /></div>
+                <div className="lg:col-span-1"><BookingForm doctors={doctors} onBook={addAppointment} timeSlots={timeSlots} /></div>
+              </div>
+            )}
+            {view === 'reception_billing' && canAccessView('reception_billing') && <BillingView bills={scopedBills} appointments={appointments} onMarkPaid={markBillPaid} onGenerate={createBill} isPatient={false} />}
+            {view === 'patient_billing' && canAccessView('patient_billing') && <BillingView bills={scopedBills} appointments={appointments} onMarkPaid={markBillPaid} isPatient={true} />}
+            {view === 'patient_book' && canAccessView('patient_book') && <PatientBookingView doctors={doctors} onBook={addAppointment} user={user} timeSlots={timeSlots} />}
+            {view === 'patient_history' && canAccessView('patient_history') && <PatientHistoryView records={scopedRecords} />}
+            {view === 'doctor_queue' && canAccessView('doctor_queue') && <DoctorQueueView appointments={scopedAppointments} setView={setView} />}
+            {view === 'doctor_records' && canAccessView('doctor_records') && <DoctorRecordsView records={scopedRecords} appointments={scopedAppointments} doctor={user} onAddRecord={addRecord} />}
+            {(view === 'admin_beds' || view === 'reception_beds') && canAccessView(view) && <BedManagementView beds={beds} pendingAdmissions={pendingAdmissions} onUpdateBed={updateBed} />}
+            {view === 'financials' && canAccessView('financials') && financials && <FinancialDashboardView financials={financials} analytics={analytics} />}
+          </motion.div>
+        </AnimatePresence>
       </main>
     </div>
   );
@@ -574,7 +606,7 @@ function SidebarLink({ icon: Icon, label, active, onClick }) {
   );
 }
 
-function DashboardView({ user, appointments, doctors, bills, notifications, records }) {
+function DashboardView({ user, appointments, doctors, bills, notifications, records, analytics }) {
   const patientCount = useMemo(() => {
     const names = new Set([
       ...appointments.map((a) => a.patientName),
@@ -585,6 +617,10 @@ function DashboardView({ user, appointments, doctors, bills, notifications, reco
   }, [appointments, records, bills]);
 
   const revenue = useMemo(() => bills.filter((b) => b.status === 'Paid').reduce((sum, b) => sum + Number(b.amount || 0), 0), [bills]);
+
+  const pendingBills = useMemo(() => bills.filter((b) => b.status === 'Pending').length, [bills]);
+  const scheduledAppointments = useMemo(() => appointments.filter((a) => a.status === 'Scheduled').length, [appointments]);
+  const completedAppointments = useMemo(() => appointments.filter((a) => a.status === 'Completed').length, [appointments]);
 
   const statsByRole = {
     admin: [
@@ -615,33 +651,108 @@ function DashboardView({ user, appointments, doctors, bills, notifications, reco
     <div className="space-y-6">
       <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
         {stats.map((s) => (
-          <Card key={s.label} className="p-6 flex items-center space-x-4">
-            <div className="p-3 bg-slate-100 text-slate-700 rounded-xl"><s.icon size={24} /></div>
-            <div><p className="text-xs font-bold text-slate-400 uppercase">{s.label}</p><h3 className="text-2xl font-bold">{s.value}</h3></div>
-          </Card>
+          <motion.div
+            key={s.label}
+            whileHover={{ y: -5, transition: { duration: 0.2 } }}
+          >
+            <Card className="p-6 flex items-center space-x-4">
+              <div className="p-3 bg-slate-100 text-slate-700 rounded-xl"><s.icon size={24} /></div>
+              <div><p className="text-xs font-bold text-slate-400 uppercase">{s.label}</p><h3 className="text-2xl font-bold">{s.value}</h3></div>
+            </Card>
+          </motion.div>
         ))}
       </div>
+      
+      {user.role === 'admin' && analytics.trends && analytics.trends.length > 0 && (
+        <Card className="p-6">
+          <h3 className="font-bold text-slate-800 mb-6 flex items-center"><BarChart3 size={20} className="mr-2 text-blue-600" /> Revenue Growth (Last 30 Days)</h3>
+          <div className="h-[300px] w-full">
+            <ResponsiveContainer width="100%" height="100%">
+              <AreaChart data={analytics.trends}>
+                <defs>
+                  <linearGradient id="colorTotal" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="5%" stopColor="#3b82f6" stopOpacity={0.1}/>
+                    <stop offset="95%" stopColor="#3b82f6" stopOpacity={0}/>
+                  </linearGradient>
+                </defs>
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+                <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#94a3b8' }} dy={10} />
+                <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#94a3b8' }} tickFormatter={(val) => `₹${val}`} />
+                <Tooltip 
+                  contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)' }}
+                  itemStyle={{ fontSize: '12px', fontWeight: 'bold' }}
+                />
+                <Area type="monotone" dataKey="total" stroke="#3b82f6" strokeWidth={3} fillOpacity={1} fill="url(#colorTotal)" />
+              </AreaChart>
+            </ResponsiveContainer>
+          </div>
+        </Card>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <Card className="p-6">
-          <h3 className="font-bold text-slate-800 mb-4">Recent Notifications</h3>
+          <div className="flex justify-between items-center mb-4">
+            <h3 className="font-bold text-slate-800">Recent Notifications</h3>
+            {notifications.length > 0 && <span className="text-[10px] font-black bg-blue-100 text-blue-700 px-2 py-0.5 rounded uppercase">Live</span>}
+          </div>
           <div className="space-y-4">
             {notifications.length === 0 && <p className="text-sm text-slate-400">No notifications yet.</p>}
-            {notifications.map((n) => (
-              <div key={n.id} className="flex items-start space-x-3 p-3 bg-slate-50 rounded-lg">
+            {notifications.slice(0, 5).map((n) => (
+              <motion.div 
+                key={n.id} 
+                initial={{ opacity: 0, x: -10 }}
+                animate={{ opacity: 1, x: 0 }}
+                className="flex items-start space-x-3 p-3 bg-slate-50 rounded-lg"
+              >
                 <div className="h-2 w-2 mt-2 bg-blue-500 rounded-full"></div>
                 <div><p className="text-sm text-slate-700">{n.text}</p><p className="text-xs text-slate-400">{new Date(n.time).toLocaleString()}</p></div>
-              </div>
+              </motion.div>
             ))}
           </div>
         </Card>
-        <Card className="p-6">
-          <h3 className="font-bold text-slate-800 mb-4">Today's Performance</h3>
-          <div className="space-y-4">
-            <div className="flex justify-between items-center"><span className="text-sm text-slate-600">Appointments</span><span className="font-bold">{appointments.length}</span></div>
-            <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden"><div className="bg-blue-500 h-full" style={{ width: `${Math.min(appointments.length * 10, 100)}%` }}></div></div>
-            <div className="flex justify-between items-center pt-2"><span className="text-sm text-slate-600">Paid Bills</span><span className="font-bold text-emerald-600">{bills.filter((b) => b.status === 'Paid').length}</span></div>
-          </div>
-        </Card>
+        
+        {user.role === 'admin' && analytics.stats && analytics.stats.length > 0 ? (
+          <Card className="p-6">
+            <h3 className="font-bold text-slate-800 mb-6 flex items-center"><PieChartIcon size={20} className="mr-2 text-emerald-600" /> Patient Distribution</h3>
+            <div className="h-[250px] w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={analytics.stats}
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={60}
+                    outerRadius={80}
+                    paddingAngle={5}
+                    dataKey="value"
+                  >
+                    {analytics.stats.map((entry, index) => (
+                      <Cell key={`cell-${index}`} fill={['#3b82f6', '#10b981', '#f59e0b', '#ef4444'][index % 4]} />
+                    ))}
+                  </Pie>
+                  <Tooltip />
+                </PieChart>
+              </ResponsiveContainer>
+              <div className="flex justify-center gap-4 mt-2">
+                {analytics.stats.map((s, idx) => (
+                  <div key={idx} className="flex items-center gap-1.5">
+                    <div className="w-2 h-2 rounded-full" style={{ backgroundColor: ['#3b82f6', '#10b981', '#f59e0b', '#ef4444'][idx % 4] }}></div>
+                    <span className="text-[10px] font-bold text-slate-500 uppercase">{s.name}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </Card>
+        ) : (
+          <Card className="p-6">
+            <h3 className="font-bold text-slate-800 mb-4">Today's Performance</h3>
+            <div className="space-y-4">
+              <div className="flex justify-between items-center"><span className="text-sm text-slate-600">Appointments</span><span className="font-bold">{appointments.length}</span></div>
+              <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden"><div className="bg-blue-500 h-full" style={{ width: `${Math.min(appointments.length * 10, 100)}%` }}></div></div>
+              <div className="flex justify-between items-center pt-2"><span className="text-sm text-slate-600">Paid Bills</span><span className="font-bold text-emerald-600">{bills.filter((b) => b.status === 'Paid').length}</span></div>
+            </div>
+          </Card>
+        )}
       </div>
     </div>
   );
@@ -1187,9 +1298,13 @@ function BedManagementView({ beds, pendingAdmissions, onUpdateBed }) {
                 {ward}
               </h4>
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                {beds.filter(b => b.wardName === ward).map(bed => (
-                  <div
+                {beds.filter(b => b.wardName === ward).map((bed, idx) => (
+                  <motion.div
                     key={bed.id}
+                    initial={{ opacity: 0, scale: 0.9 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                    transition={{ delay: idx * 0.03 }}
+                    whileHover={{ scale: 1.05, y: -2 }}
                     onClick={() => bed.status === 'Available' ? handleAssign(bed) : null}
                     className={`
                       relative p-4 rounded-2xl border-2 transition-all cursor-pointer group
@@ -1204,32 +1319,36 @@ function BedManagementView({ beds, pendingAdmissions, onUpdateBed }) {
                       <div className={`p-1.5 rounded-lg ${bed.status === 'Available' ? 'bg-emerald-50 text-emerald-600' : bed.status === 'Occupied' ? 'bg-indigo-100 text-indigo-600' : 'bg-rose-100 text-rose-600'}`}>
                         <Bed size={16} />
                       </div>
-                      <span className="text-[10px] font-black text-slate-400">{bed.bedNumber}</span>
+                      <span className="text-[10px] font-black text-slate-400 font-mono">{bed.bedNumber}</span>
                     </div>
 
                     {bed.status === 'Occupied' ? (
-                      <div>
+                      <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
                         <p className="text-sm font-bold text-indigo-900 truncate">{bed.patientName}</p>
                         <button
                           onClick={(e) => { e.stopPropagation(); handleDischarge(bed); }}
-                          className="mt-2 text-[10px] font-bold text-indigo-600 hover:text-indigo-800 flex items-center"
+                          className="mt-2 text-[10px] font-bold text-indigo-600 hover:text-indigo-800 flex items-center bg-indigo-100/50 px-2 py-1 rounded-lg transition-colors"
                         >
                           Discharge <ArrowRight size={10} className="ml-1" />
                         </button>
-                      </div>
+                      </motion.div>
                     ) : (
-                      <div>
+                      <div className="flex flex-col h-full justify-between">
                         <p className={`text-sm font-bold ${bed.status === 'Available' ? 'text-slate-400' : 'text-rose-400'}`}>
                           {bed.status}
                         </p>
                         {bed.status === 'Available' && selectedPatient && (
-                          <div className="absolute inset-0 bg-emerald-500/10 rounded-2xl border-2 border-emerald-500 animate-pulse flex items-center justify-center">
-                            <span className="text-[10px] font-black text-emerald-600 uppercase">Assign Here</span>
-                          </div>
+                          <motion.div 
+                            initial={{ opacity: 0 }}
+                            animate={{ opacity: 1 }}
+                            className="absolute inset-0 bg-emerald-500/10 rounded-2xl border-2 border-emerald-500 animate-pulse flex items-center justify-center z-10"
+                          >
+                            <span className="text-[10px] font-black text-emerald-600 uppercase tracking-tighter">Assign Patient</span>
+                          </motion.div>
                         )}
                       </div>
                     )}
-                  </div>
+                  </motion.div>
                 ))}
               </div>
             </div>
@@ -1278,48 +1397,74 @@ function BedManagementView({ beds, pendingAdmissions, onUpdateBed }) {
   );
 }
 
-function FinancialDashboardView({ financials }) {
+function FinancialDashboardView({ financials, analytics }) {
   const { revenue, pending, expenses, netProfit, staff, bills } = financials;
 
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
-        <Card className="p-6 bg-emerald-50 border-emerald-100">
-          <div className="flex items-center space-x-3 mb-2">
-            <div className="p-2 bg-emerald-500 rounded-lg text-white"><TrendingUp size={20} /></div>
-            <span className="text-sm font-bold text-emerald-900">Total Revenue</span>
-          </div>
-          <h3 className="text-3xl font-black text-emerald-900">₹{revenue.toLocaleString()}</h3>
-          <p className="text-xs text-emerald-600 mt-1 font-bold">Realized Cash Flow</p>
-        </Card>
+        <motion.div whileHover={{ scale: 1.02 }} transition={{ type: "spring", stiffness: 300 }}>
+          <Card className="p-6 bg-emerald-50 border-emerald-100">
+            <div className="flex items-center space-x-3 mb-2">
+              <div className="p-2 bg-emerald-500 rounded-lg text-white"><TrendingUp size={20} /></div>
+              <span className="text-sm font-bold text-emerald-900">Total Revenue</span>
+            </div>
+            <h3 className="text-3xl font-black text-emerald-900">₹{revenue.toLocaleString()}</h3>
+            <p className="text-xs text-emerald-600 mt-1 font-bold">Realized Cash Flow</p>
+          </Card>
+        </motion.div>
 
-        <Card className="p-6 bg-blue-50 border-blue-100">
-          <div className="flex items-center space-x-3 mb-2">
-            <div className="p-2 bg-blue-500 rounded-lg text-white"><Clock size={20} /></div>
-            <span className="text-sm font-bold text-blue-900">Pending Invoices</span>
-          </div>
-          <h3 className="text-3xl font-black text-blue-900">₹{pending.toLocaleString()}</h3>
-          <p className="text-xs text-blue-600 mt-1 font-bold">Awaiting Payment</p>
-        </Card>
+        <motion.div whileHover={{ scale: 1.02 }} transition={{ type: "spring", stiffness: 300 }}>
+          <Card className="p-6 bg-blue-50 border-blue-100">
+            <div className="flex items-center space-x-3 mb-2">
+              <div className="p-2 bg-blue-500 rounded-lg text-white"><Clock size={20} /></div>
+              <span className="text-sm font-bold text-blue-900">Pending Invoices</span>
+            </div>
+            <h3 className="text-3xl font-black text-blue-900">₹{pending.toLocaleString()}</h3>
+            <p className="text-xs text-blue-600 mt-1 font-bold">Awaiting Payment</p>
+          </Card>
+        </motion.div>
 
-        <Card className="p-6 bg-rose-50 border-rose-100">
-          <div className="flex items-center space-x-3 mb-2">
-            <div className="p-2 bg-rose-500 rounded-lg text-white"><Users size={20} /></div>
-            <span className="text-sm font-bold text-rose-900">Total Expenses</span>
-          </div>
-          <h3 className="text-3xl font-black text-rose-900">₹{expenses.toLocaleString()}</h3>
-          <p className="text-xs text-rose-600 mt-1 font-bold">Monthly Staff Salaries</p>
-        </Card>
+        <motion.div whileHover={{ scale: 1.02 }} transition={{ type: "spring", stiffness: 300 }}>
+          <Card className="p-6 bg-rose-50 border-rose-100">
+            <div className="flex items-center space-x-3 mb-2">
+              <div className="p-2 bg-rose-500 rounded-lg text-white"><Users size={20} /></div>
+              <span className="text-sm font-bold text-rose-900">Total Expenses</span>
+            </div>
+            <h3 className="text-3xl font-black text-rose-900">₹{expenses.toLocaleString()}</h3>
+            <p className="text-xs text-rose-600 mt-1 font-bold">Monthly Staff Salaries</p>
+          </Card>
+        </motion.div>
 
-        <Card className={`p-6 border-2 ${netProfit >= 0 ? 'bg-slate-900 border-slate-900 text-white' : 'bg-red-900 border-red-900 text-white'}`}>
-          <div className="flex items-center space-x-3 mb-2">
-            <div className={`p-2 rounded-lg ${netProfit >= 0 ? 'bg-white/20' : 'bg-white/20'}`}><Activity size={20} /></div>
-            <span className="text-sm font-bold opacity-80">Net Profit</span>
-          </div>
-          <h3 className="text-3xl font-black">₹{netProfit.toLocaleString()}</h3>
-          <p className="text-xs mt-1 font-bold opacity-60">Balance After Expenses</p>
-        </Card>
+        <motion.div whileHover={{ scale: 1.02 }} transition={{ type: "spring", stiffness: 300 }}>
+          <Card className={`p-6 border-2 ${netProfit >= 0 ? 'bg-slate-900 border-slate-900 text-white' : 'bg-red-900 border-red-900 text-white'}`}>
+            <div className="flex items-center space-x-3 mb-2">
+              <div className={`p-2 rounded-lg ${netProfit >= 0 ? 'bg-white/20' : 'bg-white/20'}`}><Activity size={20} /></div>
+              <span className="text-sm font-bold opacity-80">Net Profit</span>
+            </div>
+            <h3 className="text-3xl font-black">₹{netProfit.toLocaleString()}</h3>
+            <p className="text-xs mt-1 font-bold opacity-60">Balance After Expenses</p>
+          </Card>
+        </motion.div>
       </div>
+
+      <Card className="p-6">
+        <h3 className="font-bold text-slate-800 mb-6 flex items-center"><BarChart3 size={20} className="mr-2 text-blue-600" /> Financial Performance Trend</h3>
+        <div className="h-[300px] w-full">
+          <ResponsiveContainer width="100%" height="100%">
+            <AreaChart data={analytics.trends}>
+              <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f1f5f9" />
+              <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#94a3b8' }} dy={10} />
+              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#94a3b8' }} tickFormatter={(val) => `₹${val}`} />
+              <Tooltip 
+                contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0, 0, 0, 0.1)' }}
+                itemStyle={{ fontSize: '12px', fontWeight: 'bold' }}
+              />
+              <Area type="monotone" dataKey="total" stroke="#10b981" strokeWidth={3} fill="#10b98120" />
+            </AreaChart>
+          </ResponsiveContainer>
+        </div>
+      </Card>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         <Card className="lg:col-span-2">
@@ -1329,7 +1474,13 @@ function FinancialDashboardView({ financials }) {
           </div>
           <div className="divide-y divide-slate-100">
             {staff.map((s, idx) => (
-              <div key={idx} className="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors">
+              <motion.div 
+                key={idx} 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ delay: idx * 0.05 }}
+                className="p-4 flex items-center justify-between hover:bg-slate-50 transition-colors"
+              >
                 <div className="flex items-center space-x-4">
                   <div className="h-10 w-10 bg-slate-100 text-slate-700 rounded-full flex items-center justify-center font-bold">{s.name.charAt(0)}</div>
                   <div>
@@ -1341,7 +1492,7 @@ function FinancialDashboardView({ financials }) {
                   <p className="font-black text-slate-900">₹{s.salary.toLocaleString()}</p>
                   <p className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Salary</p>
                 </div>
-              </div>
+              </motion.div>
             ))}
           </div>
         </Card>
@@ -1351,7 +1502,7 @@ function FinancialDashboardView({ financials }) {
             <h3 className="font-black text-slate-800">Recent Transactions</h3>
           </div>
           <div className="p-4 space-y-4">
-            {bills.map((b) => (
+            {bills.slice(0, 8).map((b) => (
               <div key={b.id} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl">
                 <div className="flex items-center space-x-3">
                   <div className={`p-2 rounded-lg ${b.status === 'Paid' ? 'bg-emerald-100 text-emerald-600' : 'bg-blue-100 text-blue-600'}`}>
@@ -1370,7 +1521,6 @@ function FinancialDashboardView({ financials }) {
                 </div>
               </div>
             ))}
-            {bills.length === 0 && <p className="text-center text-slate-400 text-xs py-10">No recent transactions</p>}
           </div>
         </Card>
       </div>

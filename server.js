@@ -768,6 +768,32 @@ app.get('/api/time-slots', requireAuth, (req, res) => {
   res.json(slots);
 });
 
+// --- ANALYTICS ENDPOINTS ---
+app.get('/api/analytics/financial-trends', requireAuth, requireRole(['admin']), (req, res) => {
+  db.all(`
+    SELECT date, SUM(amount) as total 
+    FROM bills 
+    WHERE status = 'Paid' 
+    GROUP BY date 
+    ORDER BY date ASC 
+    LIMIT 30
+  `, (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
+app.get('/api/analytics/appointment-stats', requireAuth, requireRole(['admin', 'reception']), (req, res) => {
+  db.all(`
+    SELECT type as name, COUNT(*) as value 
+    FROM appointments 
+    GROUP BY type
+  `, (err, rows) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(rows);
+  });
+});
+
 // Start Server
 app.listen(PORT, () => {
   console.log(`🏥 Hospital Management System backend running on http://localhost:${PORT}`);
