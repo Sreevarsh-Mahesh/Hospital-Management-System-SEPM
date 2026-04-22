@@ -572,7 +572,8 @@ app.get('/api/medical-records', requireAuth, (req, res) => {
   });
 });
 
-
+app.post('/api/medical-records', requireAuth, requireRole(['doctor', 'admin']), (req, res) => {
+  const { patientName, patientEmail, date, doctor, diagnosis, prescription, symptoms, notes, requiresAdmission } = req.body;
   
   db.run(
     `INSERT INTO medical_records (patientName, patientEmail, date, doctor, diagnosis, prescription, symptoms, notes, requiresAdmission)
